@@ -146,11 +146,26 @@ std::vector<OrderAction> BasicStrategy::updateOrdersForBookTop(const book_top_t&
     
     static bool placeBuyOrder = true;
     static uint64_t lastOrderTime = 0;
+    static int64_t lastBidPrice = 0;
+    static int64_t lastAskPrice = 0;
     
-    if (bookTop.ts - lastOrderTime < 10000) {
+    const uint64_t TEN_MINUTES_NS = 10ULL * 60ULL * 1000000000ULL;
+    if (lastOrderTime > 0 && bookTop.ts - lastOrderTime < TEN_MINUTES_NS) {
         return actions;
     }
     
+    // Check if top of book has changed
+    bool topChanged = (bookTop.top_level.bid_nanos != lastBidPrice || 
+                       bookTop.top_level.ask_nanos != lastAskPrice);
+    
+    if (!topChanged) {
+        return actions;
+    }
+    
+    // Update the last known prices
+    lastBidPrice = bookTop.top_level.bid_nanos;
+    lastAskPrice = bookTop.top_level.ask_nanos;
+
     if (placeBuyOrder) {
         // Place buy order at the bid price
         int64_t bidPrice = bookTop.top_level.bid_nanos;
@@ -180,6 +195,8 @@ std::vector<OrderAction> BasicStrategy::updateOrdersForBookTop(const book_top_t&
         bidOrderInfo.quantity = bidQty;
         bidOrderInfo.isBid = true;
         activeOrders_.push_back(bidOrderInfo);
+
+        lastOrderTime = bookTop.ts;
     } else {
         // Place sell order at the ask price
         int64_t askPrice = bookTop.top_level.ask_nanos;
@@ -209,10 +226,10 @@ std::vector<OrderAction> BasicStrategy::updateOrdersForBookTop(const book_top_t&
         askOrderInfo.quantity = askQty;
         askOrderInfo.isBid = false;
         activeOrders_.push_back(askOrderInfo);
+
+        lastOrderTime = bookTop.ts;
     }
     
     placeBuyOrder = !placeBuyOrder;
-    lastOrderTime = bookTop.ts;
-    
     return actions;
 }
