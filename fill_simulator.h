@@ -29,6 +29,8 @@ private:
     
     void processFill(uint64_t orderId, int64_t fillPrice, uint32_t fillQty, bool isBid);
     
+    void processAction(const OrderAction& action, const book_top_t& bookTop);
+    
     // Track market state
     struct MarketState {
         book_top_t lastBookTop;

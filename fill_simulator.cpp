@@ -48,20 +48,12 @@ void FillSimulator::processBookTop(const book_top_t& bookTop) {
     }
     
     // Validate the book top
-    static int invalidCount = 0;
     if (bookTop.top_level.bid_nanos <= 0 || 
         bookTop.top_level.ask_nanos <= 0 || 
         bookTop.top_level.bid_nanos >= bookTop.top_level.ask_nanos ||
         bookTop.top_level.bid_nanos == INT64_MAX ||
         bookTop.top_level.ask_nanos == INT64_MAX) {
         
-        invalidCount++;
-        if (invalidCount <= 10) {
-            std::cout << "Warning: Invalid book top detected (bid: " << bookTop.top_level.bid_nanos 
-                     << ", ask: " << bookTop.top_level.ask_nanos << ")" << std::endl;
-        } else if (invalidCount == 11) {
-            std::cout << "Further invalid book top warnings suppressed..." << std::endl;
-        }
         return;
     }
     
@@ -85,151 +77,7 @@ void FillSimulator::processBookTop(const book_top_t& bookTop) {
     
     // Process each action
     for (const auto& action : actions) {
-        switch (action.type) {
-            case OrderAction::Type::ADD: {
-                // Add new order
-                OrderInfo order;
-                order.orderId = action.orderId;
-                order.symbolId = action.symbolId;
-                order.sent_ts = action.sent_ts;
-                order.md_ts = action.md_ts;
-                order.price = action.price;
-                order.quantity = action.quantity;
-                order.filledQuantity = 0;
-                order.isBid = action.isBid;
-                order.isPostOnly = action.isPostOnly;
-
-                activeOrders_[action.orderId] = order;
-                totalOrdersPlaced_++;
-                
-                // Write the add order record to file
-                OrderRecord record;
-                record.timestamp = bookTop.ts;
-                record.event_type = 1;  // Add order
-                record.order_id = action.orderId;
-                record.symbol_id = action.symbolId;
-                record.price = action.price;
-                record.quantity = action.quantity;
-                record.is_bid = action.isBid;
-                writeOrderRecord(record);
-
-                // Check if the order would be immediately filled
-                if (wouldOrderBeFilled(action.orderId, action.isBid, action.price, action.quantity)) {
-                    if (action.isPostOnly) {
-                        // For post-only orders that would immediately fill, cancel them instead
-                        std::cout << "Canceling post-only " << (action.isBid ? "buy" : "sell") 
-                                << " order at $" << static_cast<double>(action.price)/1e9 
-                                << " that would cross the market" << std::endl;
-                        activeOrders_.erase(action.orderId);
-
-                        // Write cancel record for post-only that would cross
-                        OrderRecord cancelRecord;
-                        cancelRecord.timestamp = bookTop.ts;
-                        cancelRecord.event_type = 2;  // Cancel order
-                        cancelRecord.order_id = action.orderId;
-                        cancelRecord.symbol_id = action.symbolId;
-                        cancelRecord.price = action.price;
-                        cancelRecord.quantity = action.quantity;
-                        cancelRecord.is_bid = action.isBid;
-                        writeOrderRecord(cancelRecord);
-                    } else {
-                        // For normal orders, process the fill as usual
-                        int64_t fillPrice;
-                        if (action.isBid) {
-                            fillPrice = bookTop.top_level.ask_nanos;
-                        } else {
-                            fillPrice = bookTop.top_level.bid_nanos;
-                        }
-                        
-                        processFill(action.orderId, fillPrice, action.quantity, action.isBid);
-                    }
-                }
-                break;
-            }
-            case OrderAction::Type::CANCEL: {
-                // Cancel existing order
-                auto it = activeOrders_.find(action.orderId);
-                if (it != activeOrders_.end()) {
-                    activeOrders_.erase(it);
-
-                    // Write cancel record
-                    OrderRecord record;
-                    record.timestamp = bookTop.ts;
-                    record.event_type = 2;  // Cancel order
-                    record.order_id = action.orderId;
-                    record.symbol_id = it->second.symbolId;
-                    record.price = it->second.price;
-                    record.quantity = it->second.quantity;
-                    record.is_bid = it->second.isBid;
-                    writeOrderRecord(record);
-                }
-                break;
-            }
-            case OrderAction::Type::MODIFY: {
-                // Modify existing order
-                auto it = activeOrders_.find(action.orderId);
-                if (it != activeOrders_.end()) {
-                    // First log the cancel of the original order
-                    OrderRecord cancelRecord;
-                    cancelRecord.timestamp = bookTop.ts;
-                    cancelRecord.event_type = 2;  // Cancel order
-                    cancelRecord.order_id = action.orderId;
-                    cancelRecord.symbol_id = it->second.symbolId;
-                    cancelRecord.price = it->second.price;
-                    cancelRecord.quantity = it->second.quantity;
-                    cancelRecord.is_bid = it->second.isBid;
-                    writeOrderRecord(cancelRecord);
-                    
-                    // Then log the add of the modified order
-                    OrderRecord addRecord;
-                    addRecord.timestamp = bookTop.ts;
-                    addRecord.event_type = 1;  // Add order
-                    addRecord.order_id = action.orderId;
-                    addRecord.symbol_id = it->second.symbolId;
-                    addRecord.price = action.price;
-                    addRecord.quantity = action.quantity;
-                    addRecord.is_bid = it->second.isBid;
-                    writeOrderRecord(addRecord);
-                    
-                    // Update the order in memory
-                    it->second.price = action.price;
-                    it->second.quantity = action.quantity;
-                    
-                    // Check if the modified order would be immediately filled
-                    if (wouldOrderBeFilled(action.orderId, it->second.isBid, action.price, action.quantity)) {
-                        if (it->second.isPostOnly) {
-                            // For post-only orders that would immediately fill, cancel them instead
-                            std::cout << "Canceling post-only " << (it->second.isBid ? "buy" : "sell") 
-                                    << " order at $" << static_cast<double>(action.price)/1e9 
-                                    << " after modification that would cross the market" << std::endl;
-                            activeOrders_.erase(action.orderId);
-
-                            // Write cancel record for post-only
-                            OrderRecord postOnlyCancelRecord;
-                            postOnlyCancelRecord.timestamp = bookTop.ts;
-                            postOnlyCancelRecord.event_type = 2;  // Cancel order
-                            postOnlyCancelRecord.order_id = action.orderId;
-                            postOnlyCancelRecord.symbol_id = it->second.symbolId;
-                            postOnlyCancelRecord.price = action.price;
-                            postOnlyCancelRecord.quantity = action.quantity;
-                            postOnlyCancelRecord.is_bid = it->second.isBid;
-                            writeOrderRecord(postOnlyCancelRecord);
-                        } else {
-                            // For normal orders, process the fill as usual
-                            int64_t fillPrice;
-                            if (it->second.isBid) {
-                                fillPrice = bookTop.top_level.ask_nanos;
-                            } else {
-                                fillPrice = bookTop.top_level.bid_nanos;
-                            }
-                            
-                            processFill(action.orderId, fillPrice, action.quantity, it->second.isBid);
-                        }
-                    }
-                }
-                break;
-            }
-        }
+        processAction(action, bookTop);
     }
 
     // Check if any existing orders would now be filled with the new market prices
@@ -245,11 +93,14 @@ void FillSimulator::processBookTop(const book_top_t& bookTop) {
             }
             
             uint32_t remainingQty = order.quantity - order.filledQuantity;
-            processFill(order.orderId, fillPrice, remainingQty, order.isBid);
+            uint64_t orderId = order.orderId;
             
-            auto findIt = activeOrders_.find(order.orderId);
-            if (findIt == activeOrders_.end()) {
-                it = activeOrders_.erase(it);
+            auto nextIt = std::next(it);
+            
+            processFill(orderId, fillPrice, remainingQty, order.isBid);
+            
+            if (activeOrders_.find(orderId) == activeOrders_.end()) {
+                it = nextIt;
             } else {
                 ++it;
             }
@@ -262,8 +113,10 @@ void FillSimulator::processBookTop(const book_top_t& bookTop) {
 // Process a book fill event
 void FillSimulator::processBookFill(const book_fill_snapshot_t& fill) {
     auto actions = strategy_->onFill(fill);
-    if (!actions.empty()) {
-        std::cout << "Received " << actions.size() << " actions from fill event, processing skipped" << std::endl;
+    
+    // Process any actions returned by the strategy
+    for (const auto& action : actions) {
+        processAction(action, marketState_.lastBookTop);
     }
 }
 
@@ -296,27 +149,33 @@ bool FillSimulator::wouldOrderBeFilled(uint64_t /* orderId */, bool isBid, int64
 
 // Process a fill event, updating position and cash flow
 void FillSimulator::processFill(uint64_t orderId, int64_t fillPrice, uint32_t fillQty, bool isBid) {
-    // Validate fill price to avoid overflow and unrealistic values
-    if (fillPrice <= 0 || fillPrice == INT64_MAX || fillQty == 0) {
-        std::cout << "WARNING: Skipping invalid fill with price: " << fillPrice << std::endl;
+    // Check if the order exists
+    auto orderIt = activeOrders_.find(orderId);
+    if (orderIt == activeOrders_.end()) {
+        std::cerr << "Warning: Attempted to fill non-existent order ID " << orderId << std::endl;
         return;
     }
-        
-    // Update order
-    auto it = activeOrders_.find(orderId);
-    if (it == activeOrders_.end()) {
+
+    // Validate fill price to avoid overflow and unrealistic values
+    if (fillPrice <= 0 || fillPrice == INT64_MAX || fillQty == 0) {
+        std::cout << "Warning: Skipping invalid fill with price: " << fillPrice << std::endl;
         return;
     }
     
-    OrderInfo& order = it->second;
-    order.filledQuantity += fillQty;
+    // Copy needed values before potentially erasing the order
+    uint64_t symbolId = orderIt->second.symbolId;
+    uint32_t totalQuantity = orderIt->second.quantity;
+    
+    // Update filled quantity
+    orderIt->second.filledQuantity += fillQty;
+    bool isFullyFilled = orderIt->second.filledQuantity >= totalQuantity;
     
     // Write fill record to file
     OrderRecord record;
     record.timestamp = marketState_.lastBookTop.ts;
     record.event_type = 3;  // Fill order
     record.order_id = orderId;
-    record.symbol_id = order.symbolId;
+    record.symbol_id = symbolId;
     record.price = fillPrice;
     record.quantity = fillQty;
     record.is_bid = isBid;
@@ -343,12 +202,174 @@ void FillSimulator::processFill(uint64_t orderId, int64_t fillPrice, uint32_t fi
     
     totalOrdersFilled_++;
     
-    // Notify strategy of the fill
+    if (isFullyFilled) {
+        activeOrders_.erase(orderIt);
+    }
+    
     auto actions = strategy_->onOrderFilled(orderId, fillPrice, fillQty, isBid);
     
-    // Remove fully filled orders
-    if (order.filledQuantity >= order.quantity) {
-        activeOrders_.erase(it);
+    // Process any additional actions from the strategy
+    for (const auto& action : actions) {
+        processAction(action, marketState_.lastBookTop);
+    }
+}
+
+// Process a single order action
+void FillSimulator::processAction(const OrderAction& action, const book_top_t& bookTop) {
+    switch (action.type) {
+        case OrderAction::Type::ADD: {
+            // Add new order
+            OrderInfo order;
+            order.orderId = action.orderId;
+            order.symbolId = action.symbolId;
+            order.sent_ts = action.sent_ts;
+            order.md_ts = action.md_ts;
+            order.price = action.price;
+            order.quantity = action.quantity;
+            order.filledQuantity = 0;
+            order.isBid = action.isBid;
+            order.isPostOnly = action.isPostOnly;
+
+            activeOrders_[action.orderId] = order;
+            totalOrdersPlaced_++;
+            
+            // Write the add order record to file
+            OrderRecord record;
+            record.timestamp = bookTop.ts;
+            record.event_type = 1;  // Add order
+            record.order_id = action.orderId;
+            record.symbol_id = action.symbolId;
+            record.price = action.price;
+            record.quantity = action.quantity;
+            record.is_bid = action.isBid;
+            writeOrderRecord(record);
+
+            // Check if the order would be immediately filled
+            if (wouldOrderBeFilled(action.orderId, action.isBid, action.price, action.quantity)) {
+                if (action.isPostOnly) {
+                    // For post-only orders that would immediately fill, cancel them instead
+                    std::cout << "Canceling post-only " << (action.isBid ? "buy" : "sell") 
+                            << " order at $" << static_cast<double>(action.price)/1e9 
+                            << " that would cross the market" << std::endl;
+                    activeOrders_.erase(action.orderId);
+
+                    // Write cancel record for post-only that would cross
+                    OrderRecord cancelRecord;
+                    cancelRecord.timestamp = bookTop.ts;
+                    cancelRecord.event_type = 2;  // Cancel order
+                    cancelRecord.order_id = action.orderId;
+                    cancelRecord.symbol_id = action.symbolId;
+                    cancelRecord.price = action.price;
+                    cancelRecord.quantity = action.quantity;
+                    cancelRecord.is_bid = action.isBid;
+                    writeOrderRecord(cancelRecord);
+                } else {
+                    // For normal orders, process the fill as usual
+                    int64_t fillPrice;
+                    if (action.isBid) {
+                        fillPrice = bookTop.top_level.ask_nanos;
+                    } else {
+                        fillPrice = bookTop.top_level.bid_nanos;
+                    }
+                    
+                    processFill(action.orderId, fillPrice, action.quantity, action.isBid);
+                }
+            }
+            break;
+        }
+        case OrderAction::Type::CANCEL: {
+            // Cancel existing order
+            auto it = activeOrders_.find(action.orderId);
+            if (it != activeOrders_.end()) {
+                // Save data for the order record before erasing
+                uint64_t symbolId = it->second.symbolId;
+                int64_t price = it->second.price;
+                uint32_t quantity = it->second.quantity;
+                bool isBid = it->second.isBid;
+                
+                // Now erase the order
+                activeOrders_.erase(it);
+
+                // Write cancel record
+                OrderRecord record;
+                record.timestamp = bookTop.ts;
+                record.event_type = 2;  // Cancel order
+                record.order_id = action.orderId;
+                record.symbol_id = symbolId;
+                record.price = price;
+                record.quantity = quantity;
+                record.is_bid = isBid;
+                writeOrderRecord(record);
+            } else {
+                std::cerr << "Warning: Attempted to cancel non-existent order ID " 
+                        << action.orderId << std::endl;
+            }
+            break;
+        }
+        case OrderAction::Type::MODIFY: {
+            // Modify existing order
+            auto it = activeOrders_.find(action.orderId);
+            if (it != activeOrders_.end()) {
+                // First log the cancel of the original order
+                OrderRecord cancelRecord;
+                cancelRecord.timestamp = bookTop.ts;
+                cancelRecord.event_type = 2;  // Cancel order
+                cancelRecord.order_id = action.orderId;
+                cancelRecord.symbol_id = it->second.symbolId;
+                cancelRecord.price = it->second.price;
+                cancelRecord.quantity = it->second.quantity;
+                cancelRecord.is_bid = it->second.isBid;
+                writeOrderRecord(cancelRecord);
+                
+                // Then log the add of the modified order
+                OrderRecord addRecord;
+                addRecord.timestamp = bookTop.ts;
+                addRecord.event_type = 1;  // Add order
+                addRecord.order_id = action.orderId;
+                addRecord.symbol_id = it->second.symbolId;
+                addRecord.price = action.price;
+                addRecord.quantity = action.quantity;
+                addRecord.is_bid = it->second.isBid;
+                writeOrderRecord(addRecord);
+                
+                // Update the order in memory
+                it->second.price = action.price;
+                it->second.quantity = action.quantity;
+                
+                // Check if the modified order would be immediately filled
+                if (wouldOrderBeFilled(action.orderId, it->second.isBid, action.price, action.quantity)) {
+                    if (it->second.isPostOnly) {
+                        // For post-only orders that would immediately fill, cancel them instead
+                        std::cout << "Canceling post-only " << (it->second.isBid ? "buy" : "sell") 
+                                << " order at $" << static_cast<double>(action.price)/1e9 
+                                << " after modification that would cross the market" << std::endl;
+                        activeOrders_.erase(action.orderId);
+
+                        // Write cancel record for post-only
+                        OrderRecord postOnlyCancelRecord;
+                        postOnlyCancelRecord.timestamp = bookTop.ts;
+                        postOnlyCancelRecord.event_type = 2;  // Cancel order
+                        postOnlyCancelRecord.order_id = action.orderId;
+                        postOnlyCancelRecord.symbol_id = it->second.symbolId;
+                        postOnlyCancelRecord.price = action.price;
+                        postOnlyCancelRecord.quantity = action.quantity;
+                        postOnlyCancelRecord.is_bid = it->second.isBid;
+                        writeOrderRecord(postOnlyCancelRecord);
+                    } else {
+                        // For normal orders, process the fill as usual
+                        int64_t fillPrice;
+                        if (it->second.isBid) {
+                            fillPrice = bookTop.top_level.ask_nanos;
+                        } else {
+                            fillPrice = bookTop.top_level.bid_nanos;
+                        }
+                        
+                        processFill(action.orderId, fillPrice, action.quantity, it->second.isBid);
+                    }
+                }
+            }
+            break;
+        }
     }
 }
 
