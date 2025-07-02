@@ -106,7 +106,7 @@ std::vector<OrderAction> BasicStrategy::checkForStaleOrders(uint64_t currentTime
             continue;
         }
         
-        if (currentTimestamp - order.creationTime >= ORDER_EXPIRY_TIME_NS) {
+        if (currentTimestamp - order.creationTime >= TEN_MINUTES_NS) {
             // Order is older than 10 minutes, cancel it
             OrderAction cancelAction;
             cancelAction.type = OrderAction::Type::CANCEL;
@@ -149,7 +149,6 @@ std::vector<OrderAction> BasicStrategy::updateOrdersForBookTop(const book_top_t&
     static int64_t lastBidPrice = 0;
     static int64_t lastAskPrice = 0;
     
-    const uint64_t TEN_MINUTES_NS = 10ULL * 60ULL * 1000000000ULL;
     if (lastOrderTime > 0 && bookTop.ts - lastOrderTime < TEN_MINUTES_NS) {
         return actions;
     }

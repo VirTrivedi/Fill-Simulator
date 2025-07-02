@@ -54,8 +54,12 @@ int main(int argc, char* argv[]) {
     }
     
     try {
+        // Define latency parameters (in nanoseconds)
+        uint64_t strategyMdLatencyNs = 1000;  // 1µs
+        uint64_t exchangeLatencyNs = 10000;  // 10µs each way
+
         // Create fill simulator
-        FillSimulator simulator(outputFilePath);
+        FillSimulator simulator(outputFilePath, strategyMdLatencyNs, exchangeLatencyNs);
         
         // Display available strategies and get user choice
         displayAvailableStrategies();

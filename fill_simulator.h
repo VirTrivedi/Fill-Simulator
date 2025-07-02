@@ -12,7 +12,9 @@
 
 class FillSimulator {
 public:
-    FillSimulator(const std::string& outputFilePath);
+    FillSimulator(const std::string& outputFilePath, 
+                  uint64_t strategyMdLatencyNs = 1000,
+                  uint64_t exchangeLatencyNs = 10000);
     ~FillSimulator();
     
     void setStrategy(std::shared_ptr<Strategy> strategy);
@@ -26,8 +28,9 @@ public:
     
 private:
     bool wouldOrderBeFilled(uint64_t orderId, bool isBid, int64_t price, uint32_t quantity);
-    
-    void processFill(uint64_t orderId, int64_t fillPrice, uint32_t fillQty, bool isBid);
+
+    void processFill(uint64_t orderId, int64_t fillPrice, uint32_t fillQty, bool isBid, 
+                     uint64_t fillNotificationTime = 0);
     
     void processAction(const OrderAction& action, const book_top_t& bookTop);
     
@@ -87,6 +90,21 @@ private:
     uint64_t totalSellVolume_;
     double totalBuyCost_;
     double totalSellProceeds_;
+
+    uint64_t strategyMdLatencyNs_;
+    uint64_t exchangeLatencyNs_;
+    
+    uint64_t applyMdLatency(uint64_t timestamp) const;
+    uint64_t applyExchangeLatency(uint64_t timestamp) const;
+
+    struct LatencyStats {
+        uint64_t totalMdEvents = 0;
+        uint64_t totalMdToStrategyLatencyNs = 0;
+        uint64_t totalStrategyToExchangeLatencyNs = 0;
+        uint64_t totalExchangeToNotificationLatencyNs = 0;
+    };
+    
+    LatencyStats latencyStats_;
 };
 
 #endif

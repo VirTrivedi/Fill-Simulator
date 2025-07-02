@@ -4,7 +4,9 @@
 #include <chrono>
 #include <algorithm>
 
-FillSimulator::FillSimulator(const std::string& outputFilePath)
+FillSimulator::FillSimulator(const std::string& outputFilePath,
+                             uint64_t strategyMdLatencyNs,
+                             uint64_t exchangeLatencyNs)
     : marketState_(),
       strategy_(nullptr),
       position_(0),
@@ -16,7 +18,9 @@ FillSimulator::FillSimulator(const std::string& outputFilePath)
       totalBuyVolume_(0),
       totalSellVolume_(0),
       totalBuyCost_(0),
-      totalSellProceeds_(0) {
+      totalSellProceeds_(0),
+      strategyMdLatencyNs_(strategyMdLatencyNs),
+      exchangeLatencyNs_(exchangeLatencyNs) {
     
     marketState_.lastValidMidPrice = 0;
     
@@ -25,6 +29,11 @@ FillSimulator::FillSimulator(const std::string& outputFilePath)
     if (!outputFile_.is_open()) {
         throw std::runtime_error("Failed to open output file: " + outputFilePath_);
     }
+
+    std::cout << "Latency simulation enabled:" << std::endl;
+    std::cout << "  Strategy MD latency: " << strategyMdLatencyNs_ / 1000.0 << " µs" << std::endl;
+    std::cout << "  Exchange latency (one-way): " << exchangeLatencyNs_ / 1000.0 << " µs" << std::endl;
+    std::cout << "  Total round-trip latency: " << (strategyMdLatencyNs_ + 2 * exchangeLatencyNs_) / 1000.0 << " µs" << std::endl;
 }
 
 FillSimulator::~FillSimulator() {
@@ -36,6 +45,15 @@ FillSimulator::~FillSimulator() {
 // Set the strategy to use for processing book tops and fills
 void FillSimulator::setStrategy(std::shared_ptr<Strategy> strategy) {
     strategy_ = strategy;
+}
+
+// Helper methods to apply latency
+uint64_t FillSimulator::applyMdLatency(uint64_t timestamp) const {
+    return timestamp + strategyMdLatencyNs_;
+}
+
+uint64_t FillSimulator::applyExchangeLatency(uint64_t timestamp) const {
+    return timestamp + exchangeLatencyNs_;
 }
 
 // Process a book top update
@@ -73,11 +91,29 @@ void FillSimulator::processBookTop(const book_top_t& bookTop) {
     marketState_.askLevels[bookTop.second_level.ask_nanos] = bookTop.second_level.ask_qty;
     marketState_.askLevels[bookTop.third_level.ask_nanos] = bookTop.third_level.ask_qty;
     
-    auto actions = strategy_->onBookTopUpdate(bookTop);
+    // Create a copy of bookTop with adjusted timestamp
+    book_top_t delayedBookTop = bookTop;
+    delayedBookTop.ts = applyMdLatency(bookTop.ts);
+
+    latencyStats_.totalMdEvents++;
+    latencyStats_.totalMdToStrategyLatencyNs += strategyMdLatencyNs_;
+
+    auto actions = strategy_->onBookTopUpdate(delayedBookTop);
     
     // Process each action
     for (const auto& action : actions) {
-        processAction(action, bookTop);
+        // Apply exchange latency to the action
+        uint64_t exchangeReceiveTime = applyExchangeLatency(delayedBookTop.ts);
+        OrderAction delayedAction = action;
+        
+        if (delayedAction.sent_ts == 0) {
+            delayedAction.sent_ts = delayedBookTop.ts;
+        }
+        delayedAction.md_ts = exchangeReceiveTime;
+        
+        latencyStats_.totalStrategyToExchangeLatencyNs += exchangeLatencyNs_;
+
+        processAction(delayedAction, bookTop);
     }
 
     // Check if any existing orders would now be filled with the new market prices
@@ -97,7 +133,10 @@ void FillSimulator::processBookTop(const book_top_t& bookTop) {
             
             auto nextIt = std::next(it);
             
-            processFill(orderId, fillPrice, remainingQty, order.isBid);
+            // Apply additional latency for the fill notification
+            uint64_t fillNotificationTime = applyExchangeLatency(order.md_ts);
+            
+            processFill(orderId, fillPrice, remainingQty, order.isBid, fillNotificationTime);
             
             if (activeOrders_.find(orderId) == activeOrders_.end()) {
                 it = nextIt;
@@ -112,11 +151,29 @@ void FillSimulator::processBookTop(const book_top_t& bookTop) {
 
 // Process a book fill event
 void FillSimulator::processBookFill(const book_fill_snapshot_t& fill) {
-    auto actions = strategy_->onFill(fill);
+    // Add MD latency to the fill timestamp
+    book_fill_snapshot_t delayedFill = fill;
+    delayedFill.ts = applyMdLatency(fill.ts);
+
+    latencyStats_.totalMdEvents++;
+    latencyStats_.totalMdToStrategyLatencyNs += strategyMdLatencyNs_;
+
+    auto actions = strategy_->onFill(delayedFill);
     
     // Process any actions returned by the strategy
     for (const auto& action : actions) {
-        processAction(action, marketState_.lastBookTop);
+        // Apply exchange latency
+        uint64_t exchangeReceiveTime = applyExchangeLatency(delayedFill.ts);
+        
+        OrderAction delayedAction = action;
+        if (delayedAction.sent_ts == 0) {
+            delayedAction.sent_ts = delayedFill.ts;
+        }
+        delayedAction.md_ts = exchangeReceiveTime;
+        
+        latencyStats_.totalStrategyToExchangeLatencyNs += exchangeLatencyNs_;
+
+        processAction(delayedAction, marketState_.lastBookTop);
     }
 }
 
@@ -148,7 +205,8 @@ bool FillSimulator::wouldOrderBeFilled(uint64_t /* orderId */, bool isBid, int64
 }
 
 // Process a fill event, updating position and cash flow
-void FillSimulator::processFill(uint64_t orderId, int64_t fillPrice, uint32_t fillQty, bool isBid) {
+void FillSimulator::processFill(uint64_t orderId, int64_t fillPrice, uint32_t fillQty, bool isBid, 
+                                uint64_t fillNotificationTime) {
     // Check if the order exists
     auto orderIt = activeOrders_.find(orderId);
     if (orderIt == activeOrders_.end()) {
@@ -162,6 +220,14 @@ void FillSimulator::processFill(uint64_t orderId, int64_t fillPrice, uint32_t fi
         return;
     }
     
+    if (fillNotificationTime == 0) {
+        fillNotificationTime = applyExchangeLatency(marketState_.lastBookTop.ts);
+    }
+
+    if (fillNotificationTime > 0) {
+        latencyStats_.totalExchangeToNotificationLatencyNs += exchangeLatencyNs_;
+    }
+    
     // Copy needed values before potentially erasing the order
     uint64_t symbolId = orderIt->second.symbolId;
     uint32_t totalQuantity = orderIt->second.quantity;
@@ -172,7 +238,7 @@ void FillSimulator::processFill(uint64_t orderId, int64_t fillPrice, uint32_t fi
     
     // Write fill record to file
     OrderRecord record;
-    record.timestamp = marketState_.lastBookTop.ts;
+    record.timestamp = fillNotificationTime;
     record.event_type = 3;  // Fill order
     record.order_id = orderId;
     record.symbol_id = symbolId;
@@ -206,16 +272,36 @@ void FillSimulator::processFill(uint64_t orderId, int64_t fillPrice, uint32_t fi
         activeOrders_.erase(orderIt);
     }
     
+    book_top_t notificationBookTop = marketState_.lastBookTop;
+    notificationBookTop.ts = fillNotificationTime;
+
     auto actions = strategy_->onOrderFilled(orderId, fillPrice, fillQty, isBid);
     
     // Process any additional actions from the strategy
     for (const auto& action : actions) {
-        processAction(action, marketState_.lastBookTop);
+        // Apply exchange latency
+        uint64_t exchangeReceiveTime = applyExchangeLatency(fillNotificationTime);
+        
+        OrderAction delayedAction = action;
+        if (delayedAction.sent_ts == 0) {
+            delayedAction.sent_ts = fillNotificationTime;
+        }
+        delayedAction.md_ts = exchangeReceiveTime;
+        
+        latencyStats_.totalStrategyToExchangeLatencyNs += exchangeLatencyNs_;
+
+        processAction(delayedAction, notificationBookTop);
     }
 }
 
 // Process a single order action
 void FillSimulator::processAction(const OrderAction& action, const book_top_t& bookTop) {
+    if (action.type == OrderAction::Type::ADD || action.type == OrderAction::Type::REPLACE) {
+        if (wouldOrderBeFilled(action.orderId, action.isBid, action.price, action.quantity)) {
+            latencyStats_.totalExchangeToNotificationLatencyNs += exchangeLatencyNs_;
+        }
+    }
+    
     switch (action.type) {
         case OrderAction::Type::ADD: {
             // Add new order
@@ -235,7 +321,7 @@ void FillSimulator::processAction(const OrderAction& action, const book_top_t& b
             
             // Write the add order record to file
             OrderRecord record;
-            record.timestamp = bookTop.ts;
+            record.timestamp = action.md_ts;
             record.event_type = 1;  // Add order
             record.order_id = action.orderId;
             record.symbol_id = action.symbolId;
@@ -255,7 +341,7 @@ void FillSimulator::processAction(const OrderAction& action, const book_top_t& b
 
                     // Write cancel record for post-only that would cross
                     OrderRecord cancelRecord;
-                    cancelRecord.timestamp = bookTop.ts;
+                    cancelRecord.timestamp = action.md_ts;
                     cancelRecord.event_type = 2;  // Cancel order
                     cancelRecord.order_id = action.orderId;
                     cancelRecord.symbol_id = action.symbolId;
@@ -272,7 +358,9 @@ void FillSimulator::processAction(const OrderAction& action, const book_top_t& b
                         fillPrice = bookTop.top_level.bid_nanos;
                     }
                     
-                    processFill(action.orderId, fillPrice, action.quantity, action.isBid);
+                    uint64_t fillNotificationTime = applyExchangeLatency(action.md_ts);
+
+                    processFill(action.orderId, fillPrice, action.quantity, action.isBid, fillNotificationTime);
                 }
             }
             break;
@@ -292,7 +380,7 @@ void FillSimulator::processAction(const OrderAction& action, const book_top_t& b
 
                 // Write cancel record
                 OrderRecord record;
-                record.timestamp = bookTop.ts;
+                record.timestamp = action.md_ts;
                 record.event_type = 2;  // Cancel order
                 record.order_id = action.orderId;
                 record.symbol_id = symbolId;
@@ -328,7 +416,7 @@ void FillSimulator::processAction(const OrderAction& action, const book_top_t& b
                 
                 // Log record with both old and new values
                 OrderRecord modifyRecord;
-                modifyRecord.timestamp = bookTop.ts;
+                modifyRecord.timestamp = action.md_ts;
                 modifyRecord.event_type = 4;  // Replace order
                 modifyRecord.order_id = action.orderId;
                 modifyRecord.symbol_id = symbolId;
@@ -350,7 +438,7 @@ void FillSimulator::processAction(const OrderAction& action, const book_top_t& b
 
                         // Write cancel record for post-only
                         OrderRecord postOnlyCancelRecord;
-                        postOnlyCancelRecord.timestamp = bookTop.ts;
+                        postOnlyCancelRecord.timestamp = action.md_ts;
                         postOnlyCancelRecord.event_type = 2;  // Cancel order
                         postOnlyCancelRecord.order_id = action.orderId;
                         postOnlyCancelRecord.symbol_id = it->second.symbolId;
@@ -367,7 +455,9 @@ void FillSimulator::processAction(const OrderAction& action, const book_top_t& b
                             fillPrice = bookTop.top_level.bid_nanos;
                         }
                         
-                        processFill(action.orderId, fillPrice, action.quantity, it->second.isBid);
+                        uint64_t fillNotificationTime = applyExchangeLatency(action.md_ts);
+                        
+                        processFill(action.orderId, fillPrice, action.quantity, it->second.isBid, fillNotificationTime);
                     }
                 }
             }
@@ -472,6 +562,47 @@ void FillSimulator::calculateResults() {
     double totalPnL = static_cast<double>(cashFlow_) / 1e9 + 
                      static_cast<double>(position_ * finalMidPrice) / 1e9;
     
+    std::cout << "\n========= LATENCY STATISTICS =========\n";
+    // Calculate actual event counts for each type of latency
+    uint64_t mdEvents = latencyStats_.totalMdEvents;
+    uint64_t strategyToExchangeEvents = totalOrdersPlaced_;
+    uint64_t exchangeToNotificationEvents = totalOrdersFilled_;
+
+    if (mdEvents > 0) {
+        std::cout << "Total MD Events: " << mdEvents << "\n";
+        std::cout << "Average MD-to-Strategy Latency: " 
+                << (latencyStats_.totalMdToStrategyLatencyNs / mdEvents) / 1000.0 
+                << " μs\n";
+    }
+
+    if (strategyToExchangeEvents > 0) {
+        std::cout << "Total Order Events: " << strategyToExchangeEvents << "\n";
+        std::cout << "Average Strategy-to-Exchange Latency: " 
+                << (latencyStats_.totalStrategyToExchangeLatencyNs / std::max(strategyToExchangeEvents, static_cast<uint64_t>(1))) / 1000.0 
+                << " μs\n";
+    }
+
+    if (exchangeToNotificationEvents > 0) {
+        std::cout << "Total Fill Events: " << exchangeToNotificationEvents << "\n";
+        std::cout << "Average Exchange-to-Notification Latency: " 
+                << (latencyStats_.totalExchangeToNotificationLatencyNs / std::max(exchangeToNotificationEvents, static_cast<uint64_t>(1))) / 1000.0 
+                << " μs\n";
+    }
+
+    // Only calculate total if we have all three types of events
+    if (mdEvents > 0 && strategyToExchangeEvents > 0 && exchangeToNotificationEvents > 0) {
+        std::cout << "Average Total Round-Trip Latency: " 
+                << (strategyMdLatencyNs_ / 1000.0 + 
+                    (strategyToExchangeEvents > 0 ? latencyStats_.totalStrategyToExchangeLatencyNs / strategyToExchangeEvents : 0) / 1000.0 + 
+                    (exchangeToNotificationEvents > 0 ? latencyStats_.totalExchangeToNotificationLatencyNs / exchangeToNotificationEvents : 0) / 1000.0)
+                << " μs\n";
+    }
+
+    std::cout << "Expected Round-Trip Latency: " 
+            << (strategyMdLatencyNs_ + 2 * exchangeLatencyNs_) / 1000.0 
+            << " μs\n";
+    std::cout << "======================================\n";
+
     std::cout << "\n========= SIMULATION RESULTS =========\n";
     std::cout << "Strategy: " << strategy_->getName() << std::endl;
     std::cout << "Total Orders Placed: " << totalOrdersPlaced_ << std::endl;

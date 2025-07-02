@@ -47,7 +47,7 @@ private:
     
     // Helper to check for orders that need to be canceled
     std::vector<OrderAction> checkForStaleOrders(uint64_t currentTimestamp);
-    static constexpr uint64_t ORDER_EXPIRY_TIME_NS = 10ULL * 60ULL * 1000000000ULL; // 10 minutes
+    static constexpr uint64_t TEN_MINUTES_NS = 10ULL * 60ULL * 1000000000ULL; // 10 minutes
 };
 
 #endif
