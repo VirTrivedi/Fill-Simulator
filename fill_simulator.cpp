@@ -306,35 +306,38 @@ void FillSimulator::processAction(const OrderAction& action, const book_top_t& b
             }
             break;
         }
-        case OrderAction::Type::MODIFY: {
-            // Modify existing order
+        case OrderAction::Type::REPLACE: {
+            // Replace existing order
             auto it = activeOrders_.find(action.orderId);
             if (it != activeOrders_.end()) {
-                // First log the cancel of the original order
-                OrderRecord cancelRecord;
-                cancelRecord.timestamp = bookTop.ts;
-                cancelRecord.event_type = 2;  // Cancel order
-                cancelRecord.order_id = action.orderId;
-                cancelRecord.symbol_id = it->second.symbolId;
-                cancelRecord.price = it->second.price;
-                cancelRecord.quantity = it->second.quantity;
-                cancelRecord.is_bid = it->second.isBid;
-                writeOrderRecord(cancelRecord);
+                // Save the original order info for record keeping
+                uint64_t symbolId = it->second.symbolId;
+                int64_t oldPrice = it->second.price;
+                uint32_t oldQuantity = it->second.quantity;
+                bool isBid = it->second.isBid;
                 
-                // Then log the add of the modified order
-                OrderRecord addRecord;
-                addRecord.timestamp = bookTop.ts;
-                addRecord.event_type = 1;  // Add order
-                addRecord.order_id = action.orderId;
-                addRecord.symbol_id = it->second.symbolId;
-                addRecord.price = action.price;
-                addRecord.quantity = action.quantity;
-                addRecord.is_bid = it->second.isBid;
-                writeOrderRecord(addRecord);
-                
-                // Update the order in memory
+                // Update order properties atomically
                 it->second.price = action.price;
                 it->second.quantity = action.quantity;
+                if (action.sent_ts > 0) {
+                    it->second.sent_ts = action.sent_ts;
+                }
+                if (action.md_ts > 0) {
+                    it->second.md_ts = action.md_ts;
+                }
+                
+                // Log record with both old and new values
+                OrderRecord modifyRecord;
+                modifyRecord.timestamp = bookTop.ts;
+                modifyRecord.event_type = 4;  // Replace order
+                modifyRecord.order_id = action.orderId;
+                modifyRecord.symbol_id = symbolId;
+                modifyRecord.old_price = oldPrice;
+                modifyRecord.price = action.price;
+                modifyRecord.old_quantity = oldQuantity;
+                modifyRecord.quantity = action.quantity;
+                modifyRecord.is_bid = isBid;
+                writeOrderRecord(modifyRecord);
                 
                 // Check if the modified order would be immediately filled
                 if (wouldOrderBeFilled(action.orderId, it->second.isBid, action.price, action.quantity)) {

@@ -10,7 +10,7 @@ struct OrderAction {
     enum class Type {
         ADD,
         CANCEL,
-        MODIFY
+        REPLACE
     };
     
     Type type;
