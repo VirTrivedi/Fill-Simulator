@@ -4,6 +4,8 @@
 #include <vector>
 #include <map>
 #include <sys/stat.h>
+#include <fstream>
+#include <sstream>
 #include "fill_simulator.h"
 #include "strategies/strategy.h"
 
@@ -14,6 +16,68 @@
 bool file_exists(const std::string& filename) {
     struct stat buffer;
     return (stat(filename.c_str(), &buffer) == 0);
+}
+
+// Function to load configuration from text file
+std::map<std::string, uint64_t> loadConfigFromFile(const std::string& configFilePath) {
+    std::map<std::string, uint64_t> config;
+    
+    // Set default values
+    config["strategy_md_latency_ns"] = 1000;  // 1µs
+    config["exchange_latency_ns"] = 10000;  // 10µs
+    
+    if (!file_exists(configFilePath)) {
+        std::cerr << "Warning: Config file not found: " << configFilePath << std::endl;
+        std::cerr << "Using default values instead." << std::endl;
+        return config;
+    }
+    
+    try {
+        std::ifstream file(configFilePath);
+        std::string line;
+        
+        while (std::getline(file, line)) {
+            // Skip empty lines and comments
+            if (line.empty() || line[0] == '#' || line[0] == ';') {
+                continue;
+            }
+            
+            // Find the equals sign
+            size_t pos = line.find('=');
+            if (pos == std::string::npos) {
+                continue;
+            }
+            
+            // Extract key and value
+            std::string key = line.substr(0, pos);
+            std::string value = line.substr(pos + 1);
+            
+            // Trim whitespace
+            key.erase(0, key.find_first_not_of(" \t"));
+            key.erase(key.find_last_not_of(" \t") + 1);
+            value.erase(0, value.find_first_not_of(" \t"));
+            value.erase(value.find_last_not_of(" \t") + 1);
+            
+            // Convert value to uint64_t and store in config map
+            try {
+                uint64_t numValue = std::stoull(value);
+                config[key] = numValue;
+            } catch (const std::exception& e) {
+                std::cerr << "Warning: Invalid value for key '" << key << "': " << value << std::endl;
+            }
+        }
+        
+        std::cout << "Loaded configuration from: " << configFilePath << std::endl;
+        std::cout << "  Strategy MD Latency: " << config["strategy_md_latency_ns"] / 1000.0 << " µs" << std::endl;
+        std::cout << "  Exchange Latency: " << config["exchange_latency_ns"] / 1000.0 << " µs" << std::endl;
+        std::cout << "  Total round-trip latency: " << (config["strategy_md_latency_ns"] + 2 * config["exchange_latency_ns"]) / 1000.0 << " µs" << std::endl;
+    }
+    catch (const std::exception& e) {
+        std::cerr << "Error loading config file: " << e.what() << std::endl;
+        std::cerr << "Using default values instead." << std::endl;
+    }
+    
+    return config;
 }
 
 // Function to create strategy based on user choice
@@ -33,14 +97,15 @@ void displayAvailableStrategies() {
 }
 
 int main(int argc, char* argv[]) {
-    if (argc != 4) {
-        std::cerr << "Usage: " << argv[0] << " <book_tops_file> <book_fills_file> <output_file>" << std::endl;
+    if (argc != 5) {
+        std::cerr << "Usage: " << argv[0] << " <book_tops_file> <book_fills_file> <output_file> <latency_config_file>" << std::endl;
         return 1;
     }
     
     std::string topsFilePath = argv[1];
     std::string fillsFilePath = argv[2];
     std::string outputFilePath = argv[3];
+    std::string latencyConfigFilePath = argv[4];
     
     // Check if input files exist
     if (!file_exists(topsFilePath)) {
@@ -54,9 +119,10 @@ int main(int argc, char* argv[]) {
     }
     
     try {
-        // Define latency parameters (in nanoseconds)
-        uint64_t strategyMdLatencyNs = 1000;  // 1µs
-        uint64_t exchangeLatencyNs = 10000;  // 10µs each way
+        // Load configuration and set latency parameters
+        auto config = loadConfigFromFile(latencyConfigFilePath);
+        uint64_t strategyMdLatencyNs = config["strategy_md_latency_ns"];
+        uint64_t exchangeLatencyNs = config["exchange_latency_ns"];
 
         // Create fill simulator
         FillSimulator simulator(outputFilePath, strategyMdLatencyNs, exchangeLatencyNs);

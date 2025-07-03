@@ -29,11 +29,6 @@ FillSimulator::FillSimulator(const std::string& outputFilePath,
     if (!outputFile_.is_open()) {
         throw std::runtime_error("Failed to open output file: " + outputFilePath_);
     }
-
-    std::cout << "Latency simulation enabled:" << std::endl;
-    std::cout << "  Strategy MD latency: " << strategyMdLatencyNs_ / 1000.0 << " µs" << std::endl;
-    std::cout << "  Exchange latency (one-way): " << exchangeLatencyNs_ / 1000.0 << " µs" << std::endl;
-    std::cout << "  Total round-trip latency: " << (strategyMdLatencyNs_ + 2 * exchangeLatencyNs_) / 1000.0 << " µs" << std::endl;
 }
 
 FillSimulator::~FillSimulator() {
