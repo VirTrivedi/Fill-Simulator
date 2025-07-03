@@ -1,12 +1,13 @@
 # Makefile for Fill Simulator
 CXX = g++
-CXXFLAGS = -std=c++11 -Wall -Wextra -O2 -g -I.
+CXXFLAGS = -std=c++11 -Wall -Wextra -O2 -g -I. -I./externals
 
 SRC_DIR = .
 STRATEGIES_DIR = strategies
 TYPES_DIR = types
 BUILD_DIR = build
 BIN_DIR = bin
+LATENCIES_DIR = latencies
 
 MAIN_SRC = $(SRC_DIR)/main.cpp
 SIMULATOR_SRC = $(SRC_DIR)/fill_simulator.cpp
@@ -27,9 +28,18 @@ all: directories $(TARGET)
 directories:
 	@mkdir -p $(BUILD_DIR)
 	@mkdir -p $(BIN_DIR)
+	@mkdir -p $(LATENCIES_DIR)
+	@mkdir -p externals/toml11
 
-$(TARGET): $(OBJS)
-	$(CXX) $(CXXFLAGS) $^ -o $@
+toml11:
+	@if [ ! -f externals/toml11/toml.hpp ]; then \
+		echo "Downloading toml11 library..."; \
+		curl -L https://raw.githubusercontent.com/ToruNiina/toml11/main/single_include/toml.hpp \
+			-o externals/toml11/toml.hpp; \
+	fi
+
+$(TARGET): toml11 $(OBJS)
+	$(CXX) $(CXXFLAGS) $(OBJS) -o $@
 
 $(MAIN_OBJ): $(MAIN_SRC) $(DEPS)
 	$(CXX) $(CXXFLAGS) -c $< -o $@
@@ -43,7 +53,11 @@ $(BUILD_DIR)/%.o: $(STRATEGIES_DIR)/%.cpp $(DEPS)
 clean:
 	rm -rf $(BUILD_DIR) $(BIN_DIR)
 
-run: all
-	@echo "Usage: ./$(TARGET) <book_tops_file> <book_fills_file> <output_file>"
+distclean: clean
+	rm -rf $(LATENCIES_DIR) third_party
 
-.PHONY: all clean run directories
+run: all
+	@echo "Usage: ./$(TARGET) <book_tops_file> <book_fills_file> <output_file> <latency_config_file>"
+	@echo "Example: ./$(TARGET) data/tops.dat data/fills.dat output.dat latencies/latency_config.toml"
+
+.PHONY: all clean distclean run directories toml11

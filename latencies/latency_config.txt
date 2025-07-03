@@ -1,6 +1,0 @@
-# Configuration for fill simulator
-# Format: key=value
-
-# Latency settings (in nanoseconds)
-strategy_md_latency_ns=1000
-exchange_latency_ns=10000

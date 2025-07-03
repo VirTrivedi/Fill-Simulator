@@ -1,0 +1,8 @@
+# Fill Simulator Latency Configuration
+
+[latency]
+# Strategy market data latency in nanoseconds
+strategy_md_latency_ns = 1000  # 1µs
+
+# Exchange latency (one-way) in nanoseconds
+exchange_latency_ns = 10000  # 10µs
