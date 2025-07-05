@@ -6,6 +6,7 @@
 #include <unordered_map>
 #include <memory>
 #include <vector>
+#include <list>
 #include <fstream>
 #include "types/market_data_types.h"
 #include "strategies/strategy.h"
@@ -14,7 +15,8 @@ class FillSimulator {
 public:
     FillSimulator(const std::string& outputFilePath, 
                   uint64_t strategyMdLatencyNs = 1000,
-                  uint64_t exchangeLatencyNs = 10000);
+                  uint64_t exchangeLatencyNs = 10000,
+                  bool useQueueSimulation = false);
     ~FillSimulator();
     
     void setStrategy(std::shared_ptr<Strategy> strategy);
@@ -23,7 +25,8 @@ public:
     void processBookFill(const book_fill_snapshot_t& fill);
     
     void runSimulation(const std::string& topsFilePath, const std::string& fillsFilePath);
-    
+    void runQueueSimulation(const std::string& bookEventsFilePath);
+
     void calculateResults();
     
 private:
@@ -105,6 +108,29 @@ private:
     };
     
     LatencyStats latencyStats_;
+
+    bool useQueueSimulation_;
+
+    using price_t = int64_t;
+    using qty_t = uint32_t;
+
+    struct order_t {
+        uint64_t order_id;
+        qty_t qty;
+        uint64_t timestamp;
+    };
+
+    // Using a list for the queue of orders at each price level
+    using order_queue_t = std::list<order_t>;
+    using level_t = std::pair<qty_t, order_queue_t>;
+    using book_side_t = std::map<price_t, level_t>;
+
+    // Order reference to quickly locate orders in the book
+    struct order_ref_t {
+        price_t price;
+        bool is_bid;
+        order_queue_t::iterator order_it;
+    };
 };
 
 #endif

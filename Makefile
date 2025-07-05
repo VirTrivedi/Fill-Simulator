@@ -1,6 +1,6 @@
 # Makefile for Fill Simulator
 CXX = g++
-CXXFLAGS = -std=c++11 -Wall -Wextra -O2 -g -I. -I./externals
+CXXFLAGS = -std=c++17 -Wall -Wextra -O2 -g -I. -I./externals
 
 SRC_DIR = .
 STRATEGIES_DIR = strategies

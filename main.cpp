@@ -6,6 +6,7 @@
 #include <sys/stat.h>
 #include <fstream>
 #include <sstream>
+#include <variant>
 #include "fill_simulator.h"
 #include "strategies/strategy.h"
 
@@ -22,12 +23,13 @@ bool file_exists(const std::string& filename) {
 }
 
 // Function to load configuration from TOML file
-std::map<std::string, uint64_t> loadConfigFromToml(const std::string& configFilePath) {
-    std::map<std::string, uint64_t> config;
+std::map<std::string, std::variant<uint64_t, bool>> loadConfigFromToml(const std::string& configFilePath) {
+    std::map<std::string, std::variant<uint64_t, bool>> config;
     
     // Set default values
-    config["strategy_md_latency_ns"] = 1000;  // 1µs
-    config["exchange_latency_ns"] = 10000;  // 10µs
+    config["strategy_md_latency_ns"] = static_cast<uint64_t>(1000);  // 1µs
+    config["exchange_latency_ns"] = static_cast<uint64_t>(10000);  // 10µs
+    config["use_queue_simulation"] = false;
     
     if (!file_exists(configFilePath)) {
         std::cerr << "Warning: Config file not found: " << configFilePath << std::endl;
@@ -52,10 +54,21 @@ std::map<std::string, uint64_t> loadConfigFromToml(const std::string& configFile
             }
         }
 
+        // Extract simulation settings
+        if (data.contains("simulation")) {
+            const auto& simulation = toml::find(data, "simulation");
+            
+            if (simulation.contains("use_queue_simulation")) {
+                config["use_queue_simulation"] = toml::find<bool>(simulation, "use_queue_simulation");
+            }
+        }
+
         std::cout << "Loaded configuration from: " << configFilePath << std::endl;
-        std::cout << "  Strategy MD Latency: " << config["strategy_md_latency_ns"] / 1000.0 << " µs" << std::endl;
-        std::cout << "  Exchange Latency: " << config["exchange_latency_ns"] / 1000.0 << " µs" << std::endl;
-        std::cout << "  Total round-trip latency: " << (config["strategy_md_latency_ns"] + 2 * config["exchange_latency_ns"]) / 1000.0 << " µs" << std::endl;
+        std::cout << "  Strategy MD Latency: " << std::get<uint64_t>(config["strategy_md_latency_ns"]) / 1000.0 << " µs" << std::endl;
+        std::cout << "  Exchange Latency: " << std::get<uint64_t>(config["exchange_latency_ns"]) / 1000.0 << " µs" << std::endl;
+        std::cout << "  Total round-trip latency: " 
+                  << (std::get<uint64_t>(config["strategy_md_latency_ns"]) + 2 * std::get<uint64_t>(config["exchange_latency_ns"])) / 1000.0 << " µs" << std::endl;
+        std::cout << "  Queue Simulation: " << (std::get<bool>(config["use_queue_simulation"]) ? "Enabled" : "Disabled") << std::endl;
     }
     catch (const std::exception& e) {
         std::cerr << "Error loading TOML config file: " << e.what() << std::endl;
@@ -82,63 +95,127 @@ void displayAvailableStrategies() {
 }
 
 int main(int argc, char* argv[]) {
-    if (argc != 5) {
-        std::cerr << "Usage: " << argv[0] << " <book_tops_file> <book_fills_file> <output_file> <latency_config_file>" << std::endl;
+    // Load the config file first
+    std::string latencyConfigFilePath;
+    bool useQueueSimulation = false;
+    
+    if (argc < 2) {
+        std::cerr << "Error: You must provide at least a config file path" << std::endl;
+        std::cerr << "Usage: " << argv[0] << " <config_file>" << std::endl;
         return 1;
     }
     
-    std::string topsFilePath = argv[1];
-    std::string fillsFilePath = argv[2];
-    std::string outputFilePath = argv[3];
-    std::string latencyConfigFilePath = argv[4];
+    latencyConfigFilePath = argv[argc-1];
     
-    // Check if input files exist
-    if (!file_exists(topsFilePath)) {
-        std::cerr << "Error: Book tops file does not exist: " << topsFilePath << std::endl;
-        return 1;
-    }
+    // Load configuration and determine simulation mode
+    auto config = loadConfigFromToml(latencyConfigFilePath);
+    useQueueSimulation = std::get<bool>(config["use_queue_simulation"]);
+    uint64_t strategyMdLatencyNs = std::get<uint64_t>(config["strategy_md_latency_ns"]);
+    uint64_t exchangeLatencyNs = std::get<uint64_t>(config["exchange_latency_ns"]);
     
-    if (!file_exists(fillsFilePath)) {
-        std::cerr << "Error: Book fills file does not exist: " << fillsFilePath << std::endl;
+    // Check if the correct number of arguments was provided
+    if ((useQueueSimulation && argc != 4) || (!useQueueSimulation && argc != 5)) {
+        if (useQueueSimulation) {
+            std::cerr << "Usage for queue simulation mode: " << argv[0] 
+                     << " <book_events_file> <output_file> <config_file>" << std::endl;
+        } else {
+            std::cerr << "Usage for tops/fills mode: " << argv[0] 
+                     << " <book_tops_file> <book_fills_file> <output_file> <config_file>" << std::endl;
+        }
         return 1;
     }
     
     try {
-        // Load configuration and set latency parameters
-        auto config = loadConfigFromToml(latencyConfigFilePath);
-        uint64_t strategyMdLatencyNs = config["strategy_md_latency_ns"];
-        uint64_t exchangeLatencyNs = config["exchange_latency_ns"];
+        std::string outputFilePath;
+        
+        if (useQueueSimulation) {
+            std::string bookEventsFilePath = argv[1];
+            outputFilePath = argv[2];
+            
+            // Check if input file exists
+            if (!file_exists(bookEventsFilePath)) {
+                std::cerr << "Error: Book events file does not exist: " << bookEventsFilePath << std::endl;
+                return 1;
+            }
+            
+            // Create fill simulator with queue simulation
+            FillSimulator simulator(outputFilePath, strategyMdLatencyNs, exchangeLatencyNs, true);
+            
+            // Display available strategies and get user choice
+            displayAvailableStrategies();
+            
+            // Get user input for strategy choice
+            int strategyChoice;
+            std::cout << "\nEnter the number of the strategy you want to use: ";
+            std::cin >> strategyChoice;
+            
+            // Validate input
+            if (std::cin.fail()) {
+                std::cin.clear();
+                std::cin.ignore(10000, '\n');
+                throw std::runtime_error("Invalid input. Please enter a number.");
+            }
+            
+            // Create chosen strategy
+            auto strategy = createStrategy(strategyChoice);
+            
+            // Set strategy in simulator
+            simulator.setStrategy(strategy);
+            
+            // Run simulation in queue mode
+            std::cout << "\nStarting simulation with '" << strategy->getName() << "' strategy in queue simulation mode..." << std::endl;
+            simulator.runQueueSimulation(bookEventsFilePath);
 
-        // Create fill simulator
-        FillSimulator simulator(outputFilePath, strategyMdLatencyNs, exchangeLatencyNs);
-        
-        // Display available strategies and get user choice
-        displayAvailableStrategies();
-        
-        // Get user input for strategy choice
-        int strategyChoice;
-        std::cout << "\nEnter the number of the strategy you want to use: ";
-        std::cin >> strategyChoice;
-        
-        // Validate input
-        if (std::cin.fail()) {
-            std::cin.clear();
-            std::cin.ignore(10000, '\n');
-            throw std::runtime_error("Invalid input. Please enter a number.");
+            // Calculate results
+            simulator.calculateResults();
+            
+        } else {
+            std::string topsFilePath = argv[1];
+            std::string fillsFilePath = argv[2];
+            outputFilePath = argv[3];
+            
+            // Check if input files exist
+            if (!file_exists(topsFilePath)) {
+                std::cerr << "Error: Book tops file does not exist: " << topsFilePath << std::endl;
+                return 1;
+            }
+            
+            if (!file_exists(fillsFilePath)) {
+                std::cerr << "Error: Book fills file does not exist: " << fillsFilePath << std::endl;
+                return 1;
+            }
+            
+            // Create fill simulator without queue simulation
+            FillSimulator simulator(outputFilePath, strategyMdLatencyNs, exchangeLatencyNs, false);
+            
+            // Display available strategies and get user choice
+            displayAvailableStrategies();
+            
+            // Get user input for strategy choice
+            int strategyChoice;
+            std::cout << "\nEnter the number of the strategy you want to use: ";
+            std::cin >> strategyChoice;
+            
+            // Validate input
+            if (std::cin.fail()) {
+                std::cin.clear();
+                std::cin.ignore(10000, '\n');
+                throw std::runtime_error("Invalid input. Please enter a number.");
+            }
+            
+            // Create chosen strategy
+            auto strategy = createStrategy(strategyChoice);
+            
+            // Set strategy in simulator
+            simulator.setStrategy(strategy);
+            
+            // Run simulation in standard mode
+            std::cout << "\nStarting simulation with '" << strategy->getName() << "' strategy..." << std::endl;
+            simulator.runSimulation(topsFilePath, fillsFilePath);
+            
+            // Calculate results
+            simulator.calculateResults();
         }
-        
-        // Create chosen strategy
-        auto strategy = createStrategy(strategyChoice);
-        
-        // Set strategy in simulator
-        simulator.setStrategy(strategy);
-        
-        // Run simulation
-        std::cout << "\nStarting simulation with '" << strategy->getName() << "' strategy..." << std::endl;
-        simulator.runSimulation(topsFilePath, fillsFilePath);
-        
-        // Calculate results
-        simulator.calculateResults();
         
         std::cout << "\nSimulation completed successfully." << std::endl;
     }

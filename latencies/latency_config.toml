@@ -6,3 +6,7 @@ strategy_md_latency_ns = 1000  # 1µs
 
 # Exchange latency (one-way) in nanoseconds
 exchange_latency_ns = 10000  # 10µs
+
+[simulation]
+# Whether to use queue simulation (true) or tops/fills (false)
+use_queue_simulation = true

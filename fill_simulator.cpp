@@ -6,7 +6,8 @@
 
 FillSimulator::FillSimulator(const std::string& outputFilePath,
                              uint64_t strategyMdLatencyNs,
-                             uint64_t exchangeLatencyNs)
+                             uint64_t exchangeLatencyNs,
+                             bool useQueueSimulation)
     : marketState_(),
       strategy_(nullptr),
       position_(0),
@@ -20,7 +21,8 @@ FillSimulator::FillSimulator(const std::string& outputFilePath,
       totalBuyCost_(0),
       totalSellProceeds_(0),
       strategyMdLatencyNs_(strategyMdLatencyNs),
-      exchangeLatencyNs_(exchangeLatencyNs) {
+      exchangeLatencyNs_(exchangeLatencyNs),
+      useQueueSimulation_(useQueueSimulation) {
     
     marketState_.lastValidMidPrice = 0;
     
@@ -536,6 +538,513 @@ void FillSimulator::runSimulation(const std::string& topsFilePath, const std::st
     // Close files
     topsFile.close();
     fillsFile.close();
+}
+
+void FillSimulator::runQueueSimulation(const std::string& bookEventsFilePath) {
+    // Open the book events file
+    std::ifstream bookEventsFile(bookEventsFilePath, std::ios::binary);
+    if (!bookEventsFile.is_open()) {
+        throw std::runtime_error("Failed to open book events file: " + bookEventsFilePath);
+    }
+    
+    // Read the header
+    book_events_file_hdr_t header;
+    bookEventsFile.read(reinterpret_cast<char*>(&header), sizeof(book_events_file_hdr_t));
+    
+    // Set symbol ID in strategy
+    strategy_->setSymbolId(header.symbol_idx);
+    
+    // Initialize order book data structures
+    book_side_t bid_book;  // Bids are stored in reverse order (highest price first)
+    book_side_t ask_book;  // Asks are stored in normal order (lowest price first)
+    
+    // Map to quickly find orders in the book
+    std::unordered_map<uint64_t, order_ref_t> order_map;
+    
+    // Process book events
+    book_event_hdr_t eventHeader;
+    uint64_t processedEvents = 0;
+    
+    // Variables to track the current best bid/ask
+    book_top_t currentTop;
+    currentTop.ts = 0;
+    currentTop.seqno = 0;
+    currentTop.top_level.bid_nanos = 0;
+    currentTop.top_level.ask_nanos = INT64_MAX;
+    currentTop.top_level.bid_qty = 0;
+    currentTop.top_level.ask_qty = 0;
+    
+    auto updateTopLevels = [&]() {
+        // Update best bid (highest price)
+        if (!bid_book.empty()) {
+            auto bestBidIt = bid_book.rbegin();  // Highest bid is at the end in a map
+            currentTop.top_level.bid_nanos = bestBidIt->first;
+            currentTop.top_level.bid_qty = bestBidIt->second.first;
+            
+            // Try to populate second and third levels if they exist
+            auto secondBidIt = std::next(bestBidIt);
+            if (secondBidIt != bid_book.rend()) {
+                currentTop.second_level.bid_nanos = secondBidIt->first;
+                currentTop.second_level.bid_qty = secondBidIt->second.first;
+                
+                auto thirdBidIt = std::next(secondBidIt);
+                if (thirdBidIt != bid_book.rend()) {
+                    currentTop.third_level.bid_nanos = thirdBidIt->first;
+                    currentTop.third_level.bid_qty = thirdBidIt->second.first;
+                } else {
+                    currentTop.third_level.bid_nanos = 0;
+                    currentTop.third_level.bid_qty = 0;
+                }
+            } else {
+                currentTop.second_level.bid_nanos = 0;
+                currentTop.second_level.bid_qty = 0;
+                currentTop.third_level.bid_nanos = 0;
+                currentTop.third_level.bid_qty = 0;
+            }
+        } else {
+            currentTop.top_level.bid_nanos = 0;
+            currentTop.top_level.bid_qty = 0;
+            currentTop.second_level.bid_nanos = 0;
+            currentTop.second_level.bid_qty = 0;
+            currentTop.third_level.bid_nanos = 0;
+            currentTop.third_level.bid_qty = 0;
+        }
+        
+        // Update best ask (lowest price)
+        if (!ask_book.empty()) {
+            auto bestAskIt = ask_book.begin();  // Lowest ask is at the beginning in a map
+            currentTop.top_level.ask_nanos = bestAskIt->first;
+            currentTop.top_level.ask_qty = bestAskIt->second.first;
+            
+            // Try to populate second and third levels if they exist
+            auto secondAskIt = std::next(bestAskIt);
+            if (secondAskIt != ask_book.end()) {
+                currentTop.second_level.ask_nanos = secondAskIt->first;
+                currentTop.second_level.ask_qty = secondAskIt->second.first;
+                
+                auto thirdAskIt = std::next(secondAskIt);
+                if (thirdAskIt != ask_book.end()) {
+                    currentTop.third_level.ask_nanos = thirdAskIt->first;
+                    currentTop.third_level.ask_qty = thirdAskIt->second.first;
+                } else {
+                    currentTop.third_level.ask_nanos = INT64_MAX;
+                    currentTop.third_level.ask_qty = 0;
+                }
+            } else {
+                currentTop.second_level.ask_nanos = INT64_MAX;
+                currentTop.second_level.ask_qty = 0;
+                currentTop.third_level.ask_nanos = INT64_MAX;
+                currentTop.third_level.ask_qty = 0;
+            }
+        } else {
+            currentTop.top_level.ask_nanos = INT64_MAX;
+            currentTop.top_level.ask_qty = 0;
+            currentTop.second_level.ask_nanos = INT64_MAX;
+            currentTop.second_level.ask_qty = 0;
+            currentTop.third_level.ask_nanos = INT64_MAX;
+            currentTop.third_level.ask_qty = 0;
+        }
+    };
+
+    std::cout << "Starting queue simulation, processing book events from " << bookEventsFilePath << std::endl;
+    
+    while (bookEventsFile.read(reinterpret_cast<char*>(&eventHeader), sizeof(book_event_hdr_t))) {
+        // Update timestamp in the current top
+        currentTop.ts = eventHeader.ts;
+        currentTop.seqno = eventHeader.seq_no;
+        
+        bool topChanged = false;
+        
+        switch (eventHeader.type) {
+            case book_event_type_e::add_order: {
+                add_order_t addOrder;
+                bookEventsFile.read(reinterpret_cast<char*>(&addOrder), sizeof(add_order_t));
+                
+                // Add order to appropriate book side
+                book_side_t& book = addOrder.is_bid ? bid_book : ask_book;
+                price_t price = addOrder.price;
+                
+                // Create new level if it doesn't exist
+                if (book.find(price) == book.end()) {
+                    book[price] = std::make_pair(0, order_queue_t());
+                }
+                
+                // Add order to queue and update total quantity
+                auto& level = book[price];
+                level.first += addOrder.qty;
+                level.second.push_back({addOrder.order_id, addOrder.qty, eventHeader.ts});
+                
+                // Store reference to the order
+                order_ref_t ref = {
+                    price,
+                    addOrder.is_bid,
+                    std::prev(level.second.end())
+                };
+                order_map[addOrder.order_id] = ref;
+                
+                // Check if top of book changed
+                if (addOrder.is_bid && (bid_book.empty() || price >= bid_book.rbegin()->first)) {
+                    topChanged = true;
+                } else if (!addOrder.is_bid && (ask_book.empty() || price <= ask_book.begin()->first)) {
+                    topChanged = true;
+                }
+                break;
+            }
+            
+            case book_event_type_e::delete_order: {
+                delete_order_t deleteOrder;
+                bookEventsFile.read(reinterpret_cast<char*>(&deleteOrder), sizeof(delete_order_t));
+                
+                auto orderIt = order_map.find(deleteOrder.order_id);
+                if (orderIt != order_map.end()) {
+                    const auto& ref = orderIt->second;
+                    book_side_t& book = ref.is_bid ? bid_book : ask_book;
+                    auto levelIt = book.find(ref.price);
+                    
+                    if (levelIt != book.end()) {
+                        // Update the quantity at this price level
+                        levelIt->second.first -= ref.order_it->qty;
+                        
+                        // Check if we need to update top of book
+                        if ((ref.is_bid && ref.price == currentTop.top_level.bid_nanos) ||
+                            (!ref.is_bid && ref.price == currentTop.top_level.ask_nanos)) {
+                            topChanged = true;
+                        }
+                        
+                        // Remove the order from the queue
+                        levelIt->second.second.erase(ref.order_it);
+                        
+                        // If level is now empty, remove it
+                        if (levelIt->second.first == 0) {
+                            book.erase(levelIt);
+                        }
+                    }
+                    
+                    // Remove from order map
+                    order_map.erase(orderIt);
+                }
+                break;
+            }
+            
+            case book_event_type_e::replace_order: {
+                replace_order_t replaceOrder;
+                bookEventsFile.read(reinterpret_cast<char*>(&replaceOrder), sizeof(replace_order_t));
+                
+                // First, delete the original order
+                auto orderIt = order_map.find(replaceOrder.orig_order_id);
+                if (orderIt != order_map.end()) {
+                    const auto& ref = orderIt->second;
+                    book_side_t& book = ref.is_bid ? bid_book : ask_book;
+                    auto levelIt = book.find(ref.price);
+                    
+                    if (levelIt != book.end()) {
+                        // Update the quantity at this price level
+                        levelIt->second.first -= ref.order_it->qty;
+                        
+                        // Check if we need to update top of book
+                        if ((ref.is_bid && ref.price == currentTop.top_level.bid_nanos) ||
+                            (!ref.is_bid && ref.price == currentTop.top_level.ask_nanos)) {
+                            topChanged = true;
+                        }
+                        
+                        // Remove the order from the queue
+                        levelIt->second.second.erase(ref.order_it);
+                        
+                        // If level is now empty, remove it
+                        if (levelIt->second.first == 0) {
+                            book.erase(levelIt);
+                        }
+                    }
+                    
+                    // Remove from order map
+                    order_map.erase(orderIt);
+                }
+                
+                // Now add the new order (similar to add_order but with new ID)
+                bool isBid = (orderIt != order_map.end()) ? orderIt->second.is_bid : 
+                             (replaceOrder.price > 0);  // Best guess if we don't know the side
+                
+                book_side_t& book = isBid ? bid_book : ask_book;
+                price_t price = replaceOrder.price;
+                
+                // Create new level if it doesn't exist
+                if (book.find(price) == book.end()) {
+                    book[price] = std::make_pair(0, order_queue_t());
+                }
+                
+                // Add order to queue and update total quantity
+                auto& level = book[price];
+                level.first += replaceOrder.qty;
+                level.second.push_back({replaceOrder.new_order_id, replaceOrder.qty, eventHeader.ts});
+                
+                // Store reference to the order
+                order_ref_t ref = {
+                    price,
+                    isBid,
+                    std::prev(level.second.end())
+                };
+                order_map[replaceOrder.new_order_id] = ref;
+                
+                // Check if top of book changed
+                if (isBid && (bid_book.empty() || price >= bid_book.rbegin()->first)) {
+                    topChanged = true;
+                } else if (!isBid && (ask_book.empty() || price <= ask_book.begin()->first)) {
+                    topChanged = true;
+                }
+                break;
+            }
+            
+            case book_event_type_e::amend_order: {
+                amend_order_t amendOrder;
+                bookEventsFile.read(reinterpret_cast<char*>(&amendOrder), sizeof(amend_order_t));
+                
+                auto orderIt = order_map.find(amendOrder.order_id);
+                if (orderIt != order_map.end()) {
+                    const auto& ref = orderIt->second;
+                    book_side_t& book = ref.is_bid ? bid_book : ask_book;
+                    auto levelIt = book.find(ref.price);
+                    
+                    if (levelIt != book.end()) {
+                        // Calculate the delta in qty
+                        uint32_t oldQty = ref.order_it->qty;
+                        uint32_t qtyDelta = amendOrder.new_qty - oldQty;
+                        
+                        // Update the order quantity
+                        ref.order_it->qty = amendOrder.new_qty;
+                        ref.order_it->timestamp = eventHeader.ts;  // Update timestamp on amend
+                        
+                        // Update the level quantity
+                        levelIt->second.first += qtyDelta;
+                        
+                        // Check if this affects top of book
+                        if ((ref.is_bid && ref.price == currentTop.top_level.bid_nanos) ||
+                            (!ref.is_bid && ref.price == currentTop.top_level.ask_nanos)) {
+                            topChanged = true;
+                        }
+                    }
+                }
+                break;
+            }
+            
+            case book_event_type_e::reduce_order: {
+                reduce_order_t reduceOrder;
+                bookEventsFile.read(reinterpret_cast<char*>(&reduceOrder), sizeof(reduce_order_t));
+                
+                auto orderIt = order_map.find(reduceOrder.order_id);
+                if (orderIt != order_map.end()) {
+                    const auto& ref = orderIt->second;
+                    book_side_t& book = ref.is_bid ? bid_book : ask_book;
+                    auto levelIt = book.find(ref.price);
+                    
+                    if (levelIt != book.end()) {
+                        // Update the order quantity
+                        ref.order_it->qty -= reduceOrder.cxled_qty;
+                        ref.order_it->timestamp = eventHeader.ts;  // Update timestamp on reduction
+                        
+                        // Update the level quantity
+                        levelIt->second.first -= reduceOrder.cxled_qty;
+                        
+                        // If order is fully canceled, remove it
+                        if (ref.order_it->qty == 0) {
+                            levelIt->second.second.erase(ref.order_it);
+                            order_map.erase(orderIt);
+                            
+                            // If level is now empty, remove it
+                            if (levelIt->second.first == 0) {
+                                book.erase(levelIt);
+                            }
+                            
+                            // Check if top of book changed
+                            if ((ref.is_bid && ref.price == currentTop.top_level.bid_nanos) ||
+                                (!ref.is_bid && ref.price == currentTop.top_level.ask_nanos)) {
+                                topChanged = true;
+                            }
+                        }
+                    }
+                }
+                break;
+            }
+
+            case book_event_type_e::execute_order: {
+                execute_order_t executeOrder;
+                bookEventsFile.read(reinterpret_cast<char*>(&executeOrder), sizeof(execute_order_t));
+                
+                auto orderIt = order_map.find(executeOrder.order_id);
+                if (orderIt != order_map.end()) {
+                    const auto& ref = orderIt->second;
+                    book_side_t& book = ref.is_bid ? bid_book : ask_book;
+                    auto levelIt = book.find(ref.price);
+                    
+                    if (levelIt != book.end()) {
+                        // Get the order
+                        auto& order = *(ref.order_it);
+                        
+                        // Create a fill notification
+                        book_fill_snapshot_t fill;
+                        fill.ts = eventHeader.ts;
+                        fill.seq_no = eventHeader.seq_no;
+                        fill.resting_order_id = executeOrder.order_id;
+                        fill.was_hidden = false;
+                        fill.trade_price = ref.price;
+                        fill.trade_qty = executeOrder.traded_qty;
+                        fill.execution_id = executeOrder.execution_id;
+                        fill.resting_original_qty = order.qty;
+                        fill.resting_order_remaining_qty = order.qty - executeOrder.traded_qty;
+                        fill.resting_order_last_update_ts = order.timestamp;
+                        fill.resting_side_is_bid = ref.is_bid;
+                        fill.resting_side_price = ref.price;
+                        fill.resting_side_qty = levelIt->second.first;
+                        
+                        // Set opposing side info
+                        if (ref.is_bid) {
+                            fill.opposing_side_price = ask_book.empty() ? INT64_MAX : ask_book.begin()->first;
+                            fill.opposing_side_qty = ask_book.empty() ? 0 : ask_book.begin()->second.first;
+                        } else {
+                            fill.opposing_side_price = bid_book.empty() ? 0 : bid_book.rbegin()->first;
+                            fill.opposing_side_qty = bid_book.empty() ? 0 : bid_book.rbegin()->second.first;
+                        }
+                        
+                        // Update order quantity
+                        order.qty -= executeOrder.traded_qty;
+                        levelIt->second.first -= executeOrder.traded_qty;
+                        
+                        // Process the fill through our simulator
+                        processBookFill(fill);
+                        
+                        // If order is fully executed, remove it
+                        if (order.qty == 0) {
+                            levelIt->second.second.erase(ref.order_it);
+                            order_map.erase(orderIt);
+                            
+                            // If level is now empty, remove it
+                            if (levelIt->second.first == 0) {
+                                book.erase(levelIt);
+                            }
+                            
+                            // Check if top of book changed
+                            if ((ref.is_bid && ref.price == currentTop.top_level.bid_nanos) ||
+                                (!ref.is_bid && ref.price == currentTop.top_level.ask_nanos)) {
+                                topChanged = true;
+                            }
+                        }
+                    }
+                }
+                break;
+            }
+            
+            case book_event_type_e::execute_order_at_price: {
+                execute_order_at_price_t executeOrder;
+                bookEventsFile.read(reinterpret_cast<char*>(&executeOrder), sizeof(execute_order_at_price_t));
+                
+                auto orderIt = order_map.find(executeOrder.order_id);
+                if (orderIt != order_map.end()) {
+                    const auto& ref = orderIt->second;
+                    book_side_t& book = ref.is_bid ? bid_book : ask_book;
+                    auto levelIt = book.find(ref.price);
+                    
+                    if (levelIt != book.end()) {
+                        // Get the order
+                        auto& order = *(ref.order_it);
+                        
+                        // Create a fill notification (using execution price, not order price)
+                        book_fill_snapshot_t fill;
+                        fill.ts = eventHeader.ts;
+                        fill.seq_no = eventHeader.seq_no;
+                        fill.resting_order_id = executeOrder.order_id;
+                        fill.was_hidden = false;
+                        fill.trade_price = executeOrder.execution_price;  // Use execution price
+                        fill.trade_qty = executeOrder.traded_qty;
+                        fill.execution_id = executeOrder.execution_id;
+                        fill.resting_original_qty = order.qty;
+                        fill.resting_order_remaining_qty = order.qty - executeOrder.traded_qty;
+                        fill.resting_order_last_update_ts = order.timestamp;
+                        fill.resting_side_is_bid = ref.is_bid;
+                        fill.resting_side_price = ref.price;
+                        fill.resting_side_qty = levelIt->second.first;
+                        
+                        // Set opposing side info
+                        if (ref.is_bid) {
+                            fill.opposing_side_price = ask_book.empty() ? INT64_MAX : ask_book.begin()->first;
+                            fill.opposing_side_qty = ask_book.empty() ? 0 : ask_book.begin()->second.first;
+                        } else {
+                            fill.opposing_side_price = bid_book.empty() ? 0 : bid_book.rbegin()->first;
+                            fill.opposing_side_qty = bid_book.empty() ? 0 : bid_book.rbegin()->second.first;
+                        }
+                        
+                        // Update order quantity
+                        order.qty -= executeOrder.traded_qty;
+                        levelIt->second.first -= executeOrder.traded_qty;
+                        
+                        // Process the fill through our simulator
+                        processBookFill(fill);
+                        
+                        // If order is fully executed, remove it
+                        if (order.qty == 0) {
+                            levelIt->second.second.erase(ref.order_it);
+                            order_map.erase(orderIt);
+                            
+                            // If level is now empty, remove it
+                            if (levelIt->second.first == 0) {
+                                book.erase(levelIt);
+                            }
+                            
+                            // Check if top of book changed
+                            if ((ref.is_bid && ref.price == currentTop.top_level.bid_nanos) ||
+                                (!ref.is_bid && ref.price == currentTop.top_level.ask_nanos)) {
+                                topChanged = true;
+                            }
+                        }
+                    }
+                }
+                break;
+            }
+                        
+            case book_event_type_e::clear_book: {
+                // Clear the entire book
+                bid_book.clear();
+                ask_book.clear();
+                order_map.clear();
+                topChanged = true;
+                break;
+            }
+            
+            default:
+                // Skip any other event types
+                break;
+        }
+        
+        // Update top of book if needed
+        if (topChanged) {
+            updateTopLevels();
+            
+            // Now process the updated book top through our strategy
+            processBookTop(currentTop);
+        }
+        
+        processedEvents++;
+        
+        // Print progress
+        if (processedEvents % 100000 == 0) {
+            std::cout << "Processed " << processedEvents << " book events..." << std::endl;
+            std::cout << "Current book: Bid " << bid_book.size() << " levels, Ask " 
+                      << ask_book.size() << " levels, " << order_map.size() << " active orders" << std::endl;
+            std::cout << "Current fills: " << totalOrdersFilled_ << " of " 
+                      << totalOrdersPlaced_ << " orders" << std::endl;
+            
+            // Print current position and P&L if we have valid prices
+            if (currentTop.top_level.bid_nanos > 0 && currentTop.top_level.ask_nanos < INT64_MAX) {
+                int64_t midPrice = (currentTop.top_level.bid_nanos + currentTop.top_level.ask_nanos) / 2;
+                int64_t positionValue = position_ * midPrice;
+                std::cout << "Current position: " << position_ << " shares, value: $" 
+                          << static_cast<double>(positionValue) / 1e9 << std::endl;
+            }
+        }
+    }
+    
+    std::cout << "Simulation complete. Processed " << processedEvents << " book events." << std::endl;
+    
+    // Close file
+    bookEventsFile.close();
 }
 
 // Write an order record to the output file
