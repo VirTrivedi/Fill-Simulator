@@ -62,12 +62,14 @@ void FillSimulator::processBookTop(const book_top_t& bookTop) {
         return;
     }
     
+    const int64_t MAX_REASONABLE_PRICE = 10000LL * 1000000000LL; // $10,000 in nanos
+
     // Validate the book top
     if (bookTop.top_level.bid_nanos <= 0 || 
         bookTop.top_level.ask_nanos <= 0 || 
         bookTop.top_level.bid_nanos >= bookTop.top_level.ask_nanos ||
-        bookTop.top_level.bid_nanos == INT64_MAX ||
-        bookTop.top_level.ask_nanos == INT64_MAX) {
+        bookTop.top_level.bid_nanos > MAX_REASONABLE_PRICE ||
+        bookTop.top_level.ask_nanos > MAX_REASONABLE_PRICE) {
         
         return;
     }
@@ -147,7 +149,7 @@ void FillSimulator::processBookTop(const book_top_t& bookTop) {
 }
 
 // Process a book fill event
-void FillSimulator::processBookFill(const book_fill_snapshot_t& fill) {
+void FillSimulator::processBookFill(const book_fill_snapshot_t& fill) {    
     // Add MD latency to the fill timestamp
     book_fill_snapshot_t delayedFill = fill;
     delayedFill.ts = applyMdLatency(fill.ts);
@@ -248,21 +250,20 @@ void FillSimulator::processFill(uint64_t orderId, int64_t fillPrice, uint32_t fi
     if (isBid) {
         // Buy order filled
         position_ += fillQty;
-        int64_t cost = (fillPrice * static_cast<int64_t>(fillQty)) / 1000;
-        cashFlow_ -= cost * 1000;
+        int64_t cost = fillPrice * static_cast<int64_t>(fillQty);
+        cashFlow_ -= cost;
         
         totalBuyVolume_ += fillQty;
-        totalBuyCost_ += static_cast<double>(fillPrice) * fillQty / 1e9;
+        totalBuyCost_ += static_cast<double>(cost) / 1e9;
     } else {
         // Sell order filled
         position_ -= fillQty;
-        int64_t proceeds = (fillPrice * static_cast<int64_t>(fillQty)) / 1000;
-        cashFlow_ += proceeds * 1000;
+        int64_t proceeds = fillPrice * static_cast<int64_t>(fillQty);
+        cashFlow_ += proceeds;
         
         totalSellVolume_ += fillQty;
-        totalSellProceeds_ += static_cast<double>(fillPrice) * fillQty / 1e9;
-    }
-    
+        totalSellProceeds_ += static_cast<double>(proceeds) / 1e9;
+    }    
     totalOrdersFilled_++;
     
     if (isFullyFilled) {
@@ -555,10 +556,10 @@ void FillSimulator::runQueueSimulation(const std::string& bookEventsFilePath) {
     strategy_->setSymbolId(header.symbol_idx);
     
     // Initialize order book data structures
-    book_side_t bid_book;  // Bids are stored in reverse order (highest price first)
-    book_side_t ask_book;  // Asks are stored in normal order (lowest price first)
+    book_side_t bid_book;
+    book_side_t ask_book;
     
-    // Map to quickly find orders in the book
+    // Map to quickly find orders
     std::unordered_map<uint64_t, order_ref_t> order_map;
     
     // Process book events
@@ -575,9 +576,9 @@ void FillSimulator::runQueueSimulation(const std::string& bookEventsFilePath) {
     currentTop.top_level.ask_qty = 0;
     
     auto updateTopLevels = [&]() {
-        // Update best bid (highest price)
+        // Update best bid
         if (!bid_book.empty()) {
-            auto bestBidIt = bid_book.rbegin();  // Highest bid is at the end in a map
+            auto bestBidIt = bid_book.rbegin();
             currentTop.top_level.bid_nanos = bestBidIt->first;
             currentTop.top_level.bid_qty = bestBidIt->second.first;
             
@@ -610,9 +611,9 @@ void FillSimulator::runQueueSimulation(const std::string& bookEventsFilePath) {
             currentTop.third_level.bid_qty = 0;
         }
         
-        // Update best ask (lowest price)
+        // Update best ask
         if (!ask_book.empty()) {
-            auto bestAskIt = ask_book.begin();  // Lowest ask is at the beginning in a map
+            auto bestAskIt = ask_book.begin();
             currentTop.top_level.ask_nanos = bestAskIt->first;
             currentTop.top_level.ask_qty = bestAskIt->second.first;
             
@@ -643,6 +644,21 @@ void FillSimulator::runQueueSimulation(const std::string& bookEventsFilePath) {
             currentTop.second_level.ask_qty = 0;
             currentTop.third_level.ask_nanos = INT64_MAX;
             currentTop.third_level.ask_qty = 0;
+        }
+
+        const int64_t MAX_REASONABLE_PRICE = 10000LL * 1000000000LL; // $10,000 in nanos
+    
+        // Validate bid prices
+        if (currentTop.top_level.bid_nanos > MAX_REASONABLE_PRICE) {
+            currentTop.top_level.bid_nanos = 0;
+            currentTop.top_level.bid_qty = 0;
+        }
+        
+        // Validate ask prices
+        if (currentTop.top_level.ask_nanos > MAX_REASONABLE_PRICE && 
+            currentTop.top_level.ask_nanos != INT64_MAX) {
+            currentTop.top_level.ask_nanos = INT64_MAX;
+            currentTop.top_level.ask_qty = 0;
         }
     };
 
@@ -760,9 +776,9 @@ void FillSimulator::runQueueSimulation(const std::string& bookEventsFilePath) {
                     order_map.erase(orderIt);
                 }
                 
-                // Now add the new order (similar to add_order but with new ID)
+                // Add the new order
                 bool isBid = (orderIt != order_map.end()) ? orderIt->second.is_bid : 
-                             (replaceOrder.price > 0);  // Best guess if we don't know the side
+                             (replaceOrder.price > 0);
                 
                 book_side_t& book = isBid ? bid_book : ask_book;
                 price_t price = replaceOrder.price;
@@ -811,7 +827,7 @@ void FillSimulator::runQueueSimulation(const std::string& bookEventsFilePath) {
                         
                         // Update the order quantity
                         ref.order_it->qty = amendOrder.new_qty;
-                        ref.order_it->timestamp = eventHeader.ts;  // Update timestamp on amend
+                        ref.order_it->timestamp = eventHeader.ts;
                         
                         // Update the level quantity
                         levelIt->second.first += qtyDelta;
@@ -839,7 +855,7 @@ void FillSimulator::runQueueSimulation(const std::string& bookEventsFilePath) {
                     if (levelIt != book.end()) {
                         // Update the order quantity
                         ref.order_it->qty -= reduceOrder.cxled_qty;
-                        ref.order_it->timestamp = eventHeader.ts;  // Update timestamp on reduction
+                        ref.order_it->timestamp = eventHeader.ts;
                         
                         // Update the level quantity
                         levelIt->second.first -= reduceOrder.cxled_qty;
@@ -946,13 +962,13 @@ void FillSimulator::runQueueSimulation(const std::string& bookEventsFilePath) {
                         // Get the order
                         auto& order = *(ref.order_it);
                         
-                        // Create a fill notification (using execution price, not order price)
+                        // Create a fill notification using execution price
                         book_fill_snapshot_t fill;
                         fill.ts = eventHeader.ts;
                         fill.seq_no = eventHeader.seq_no;
                         fill.resting_order_id = executeOrder.order_id;
                         fill.was_hidden = false;
-                        fill.trade_price = executeOrder.execution_price;  // Use execution price
+                        fill.trade_price = executeOrder.execution_price;
                         fill.trade_qty = executeOrder.traded_qty;
                         fill.execution_id = executeOrder.execution_id;
                         fill.resting_original_qty = order.qty;

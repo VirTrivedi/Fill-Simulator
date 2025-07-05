@@ -138,9 +138,11 @@ std::vector<OrderAction> BasicStrategy::checkForStaleOrders(uint64_t currentTime
 std::vector<OrderAction> BasicStrategy::updateOrdersForBookTop(const book_top_t& bookTop) {
     std::vector<OrderAction> actions;
     
+    const int64_t MAX_REASONABLE_PRICE = 10000LL * 1000000000LL; // $10,000 in nanos
+
     if (bookTop.top_level.bid_nanos <= 0 || bookTop.top_level.ask_nanos <= 0 || 
         bookTop.top_level.bid_nanos >= bookTop.top_level.ask_nanos ||
-        bookTop.top_level.bid_nanos == INT64_MAX || bookTop.top_level.ask_nanos == INT64_MAX) {
+        bookTop.top_level.bid_nanos > MAX_REASONABLE_PRICE || bookTop.top_level.ask_nanos > MAX_REASONABLE_PRICE) {
         return actions;
     }
     
