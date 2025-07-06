@@ -156,7 +156,7 @@ void FillSimulator::processBookFill(const book_fill_snapshot_t& fill) {
 
     latencyStats_.totalMdEvents++;
     latencyStats_.totalMdToStrategyLatencyNs += strategyMdLatencyNs_;
-
+    
     auto actions = strategy_->onFill(delayedFill);
     
     // Process any actions returned by the strategy
@@ -1032,10 +1032,10 @@ void FillSimulator::runQueueSimulation(const std::string& bookEventsFilePath) {
         // Update top of book if needed
         if (topChanged) {
             updateTopLevels();
-            
-            // Now process the updated book top through our strategy
-            processBookTop(currentTop);
         }
+
+        // Now process the updated book top through our strategy
+        processBookTop(currentTop);
         
         processedEvents++;
         
@@ -1125,6 +1125,7 @@ void FillSimulator::calculateResults() {
 
     std::cout << "\n========= SIMULATION RESULTS =========\n";
     std::cout << "Strategy: " << strategy_->getName() << std::endl;
+    std::cout << "Queue Simulation: " << (useQueueSimulation_ ? "Enabled" : "Disabled") << std::endl;
     std::cout << "Total Orders Placed: " << totalOrdersPlaced_ << std::endl;
     std::cout << "Total Orders Filled: " << totalOrdersFilled_ << std::endl;
     std::cout << "Fill Rate: " << (totalOrdersPlaced_ > 0 ? 

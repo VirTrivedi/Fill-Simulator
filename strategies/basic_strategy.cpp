@@ -146,7 +146,6 @@ std::vector<OrderAction> BasicStrategy::updateOrdersForBookTop(const book_top_t&
         return actions;
     }
     
-    static bool placeBuyOrder = true;
     static uint64_t lastOrderTime = 0;
     static int64_t lastBidPrice = 0;
     static int64_t lastAskPrice = 0;
@@ -167,70 +166,66 @@ std::vector<OrderAction> BasicStrategy::updateOrdersForBookTop(const book_top_t&
     lastBidPrice = bookTop.top_level.bid_nanos;
     lastAskPrice = bookTop.top_level.ask_nanos;
 
-    if (placeBuyOrder) {
-        // Place buy order at the bid price
-        int64_t bidPrice = bookTop.top_level.bid_nanos;
-        uint32_t bidQty = 1;
-                
-        // New buy order
-        OrderAction newBid;
-        newBid.type = OrderAction::Type::ADD;
-        newBid.orderId = nextOrderId_++;
-        newBid.symbolId = symbolId_;
-        newBid.sent_ts = bookTop.ts;
-        newBid.md_ts = bookTop.ts;
-        newBid.price = bidPrice;
-        newBid.quantity = bidQty;
-        newBid.isBid = true;
-        newBid.isPostOnly = false;
-        actions.push_back(newBid);
-        
-        currentBidOrderId_ = newBid.orderId;
-        currentBidPrice_ = bidPrice;
-
-        // Add to active orders
-        OrderInfo bidOrderInfo;
-        bidOrderInfo.orderId = newBid.orderId;
-        bidOrderInfo.creationTime = bookTop.ts;
-        bidOrderInfo.price = bidPrice;
-        bidOrderInfo.quantity = bidQty;
-        bidOrderInfo.isBid = true;
-        activeOrders_.push_back(bidOrderInfo);
-
-        lastOrderTime = bookTop.ts;
-    } else {
-        // Place sell order at the ask price
-        int64_t askPrice = bookTop.top_level.ask_nanos;
-        uint32_t askQty = 1;
-        
-        // New sell order
-        OrderAction newAsk;
-        newAsk.type = OrderAction::Type::ADD;
-        newAsk.orderId = nextOrderId_++;
-        newAsk.symbolId = symbolId_;
-        newAsk.sent_ts = bookTop.ts;
-        newAsk.md_ts = bookTop.ts;
-        newAsk.price = askPrice;
-        newAsk.quantity = askQty;
-        newAsk.isBid = false;
-        newAsk.isPostOnly = false;
-        actions.push_back(newAsk);
-        
-        currentAskOrderId_ = newAsk.orderId;
-        currentAskPrice_ = askPrice;
-
-        // Add to active orders
-        OrderInfo askOrderInfo;
-        askOrderInfo.orderId = newAsk.orderId;
-        askOrderInfo.creationTime = bookTop.ts;
-        askOrderInfo.price = askPrice;
-        askOrderInfo.quantity = askQty;
-        askOrderInfo.isBid = false;
-        activeOrders_.push_back(askOrderInfo);
-
-        lastOrderTime = bookTop.ts;
-    }
+    // Place buy order at the bid price
+    int64_t bidPrice = bookTop.top_level.bid_nanos;
+    uint32_t bidQty = 1;
+            
+    // New buy order
+    OrderAction newBid;
+    newBid.type = OrderAction::Type::ADD;
+    newBid.orderId = nextOrderId_++;
+    newBid.symbolId = symbolId_;
+    newBid.sent_ts = bookTop.ts;
+    newBid.md_ts = bookTop.ts;
+    newBid.price = bidPrice;
+    newBid.quantity = bidQty;
+    newBid.isBid = true;
+    newBid.isPostOnly = false;
+    actions.push_back(newBid);
     
-    placeBuyOrder = !placeBuyOrder;
+    currentBidOrderId_ = newBid.orderId;
+    currentBidPrice_ = bidPrice;
+
+    // Add to active orders
+    OrderInfo bidOrderInfo;
+    bidOrderInfo.orderId = newBid.orderId;
+    bidOrderInfo.creationTime = bookTop.ts;
+    bidOrderInfo.price = bidPrice;
+    bidOrderInfo.quantity = bidQty;
+    bidOrderInfo.isBid = true;
+    activeOrders_.push_back(bidOrderInfo);
+
+    lastOrderTime = bookTop.ts;
+    // Place sell order at the ask price
+    int64_t askPrice = bookTop.top_level.ask_nanos;
+    uint32_t askQty = 1;
+    
+    // New sell order
+    OrderAction newAsk;
+    newAsk.type = OrderAction::Type::ADD;
+    newAsk.orderId = nextOrderId_++;
+    newAsk.symbolId = symbolId_;
+    newAsk.sent_ts = bookTop.ts;
+    newAsk.md_ts = bookTop.ts;
+    newAsk.price = askPrice;
+    newAsk.quantity = askQty;
+    newAsk.isBid = false;
+    newAsk.isPostOnly = false;
+    actions.push_back(newAsk);
+    
+    currentAskOrderId_ = newAsk.orderId;
+    currentAskPrice_ = askPrice;
+
+    // Add to active orders
+    OrderInfo askOrderInfo;
+    askOrderInfo.orderId = newAsk.orderId;
+    askOrderInfo.creationTime = bookTop.ts;
+    askOrderInfo.price = askPrice;
+    askOrderInfo.quantity = askQty;
+    askOrderInfo.isBid = false;
+    activeOrders_.push_back(askOrderInfo);
+
+    lastOrderTime = bookTop.ts;
+    
     return actions;
 }
