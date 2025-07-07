@@ -15,6 +15,7 @@
 
 // Include all strategy headers
 #include "strategies/basic_strategy.h"
+#include "strategies/theo_strategy.h"
 
 // Helper function to check if file exists
 bool file_exists(const std::string& filename) {
@@ -83,6 +84,8 @@ std::shared_ptr<Strategy> createStrategy(int choice) {
     switch (choice) {
         case 1:
             return std::make_shared<BasicStrategy>();
+        case 2:
+            return std::make_shared<TheoStrategy>();
         default:
             throw std::runtime_error("Invalid strategy choice");
     }
@@ -92,6 +95,7 @@ std::shared_ptr<Strategy> createStrategy(int choice) {
 void displayAvailableStrategies() {
     std::cout << "\nAvailable Strategies:\n";
     std::cout << "1. Basic Strategy - Simple strategy that places orders at the top of the book\n";
+    std::cout << "2. Theo Strategy - Advanced strategy that calculates theoretical value using a time-weighted EMA of trades and midpoints\n";
 }
 
 int main(int argc, char* argv[]) {
