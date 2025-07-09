@@ -24,13 +24,15 @@ bool file_exists(const std::string& filename) {
 }
 
 // Function to load configuration from TOML file
-std::map<std::string, std::variant<uint64_t, bool>> loadConfigFromToml(const std::string& configFilePath) {
-    std::map<std::string, std::variant<uint64_t, bool>> config;
+std::map<std::string, std::variant<uint64_t, double, bool>> loadConfigFromToml(const std::string& configFilePath) {
+    std::map<std::string, std::variant<uint64_t, double, bool>> config;
     
     // Set default values
     config["strategy_md_latency_ns"] = static_cast<uint64_t>(1000);  // 1µs
     config["exchange_latency_ns"] = static_cast<uint64_t>(10000);  // 10µs
     config["use_queue_simulation"] = false;
+    config["place_edge_percent"] = 0.1;
+    config["cancel_edge_percent"] = 0.05;
     
     if (!file_exists(configFilePath)) {
         std::cerr << "Warning: Config file not found: " << configFilePath << std::endl;
@@ -64,12 +66,27 @@ std::map<std::string, std::variant<uint64_t, bool>> loadConfigFromToml(const std
             }
         }
 
+        // Extract strategy parameters
+        if (data.contains("strategy")) {
+            const auto& strategy = toml::find(data, "strategy");
+            
+            if (strategy.contains("place_edge_percent")) {
+                config["place_edge_percent"] = toml::find<double>(strategy, "place_edge_percent");
+            }
+            
+            if (strategy.contains("cancel_edge_percent")) {
+                config["cancel_edge_percent"] = toml::find<double>(strategy, "cancel_edge_percent");
+            }
+        }
+
         std::cout << "Loaded configuration from: " << configFilePath << std::endl;
         std::cout << "  Strategy MD Latency: " << std::get<uint64_t>(config["strategy_md_latency_ns"]) / 1000.0 << " µs" << std::endl;
         std::cout << "  Exchange Latency: " << std::get<uint64_t>(config["exchange_latency_ns"]) / 1000.0 << " µs" << std::endl;
         std::cout << "  Total round-trip latency: " 
                   << (std::get<uint64_t>(config["strategy_md_latency_ns"]) + 2 * std::get<uint64_t>(config["exchange_latency_ns"])) / 1000.0 << " µs" << std::endl;
         std::cout << "  Queue Simulation: " << (std::get<bool>(config["use_queue_simulation"]) ? "Enabled" : "Disabled") << std::endl;
+        std::cout << "  Place Edge Percent: " << std::get<double>(config["place_edge_percent"]) << "%" << std::endl;
+        std::cout << "  Cancel Edge Percent: " << std::get<double>(config["cancel_edge_percent"]) << "%" << std::endl;
     }
     catch (const std::exception& e) {
         std::cerr << "Error loading TOML config file: " << e.what() << std::endl;
@@ -80,12 +97,26 @@ std::map<std::string, std::variant<uint64_t, bool>> loadConfigFromToml(const std
 }
 
 // Function to create strategy based on user choice
-std::shared_ptr<Strategy> createStrategy(int choice) {
+std::shared_ptr<Strategy> createStrategy(int choice, const std::map<std::string, std::variant<uint64_t, double, bool>>& config) {
     switch (choice) {
         case 1:
             return std::make_shared<BasicStrategy>();
-        case 2:
-            return std::make_shared<TheoStrategy>();
+        case 2: {
+            // Extract TheoStrategy parameters from config
+            double placeEdgePercent = std::get<double>(config.at("place_edge_percent"));
+            double cancelEdgePercent = std::get<double>(config.at("cancel_edge_percent"));
+            
+            // Ensure cancel edge is less than place edge
+            if (cancelEdgePercent >= placeEdgePercent) {
+                std::cout << "Warning: Cancel edge must be less than place edge. Adjusting cancel edge to 80% of place edge." << std::endl;
+                cancelEdgePercent = placeEdgePercent * 0.8;
+            }
+            
+            std::cout << "Creating TheoStrategy with place_edge=" << placeEdgePercent 
+                      << "%, cancel_edge=" << cancelEdgePercent << "%" << std::endl;
+            
+            return std::make_shared<TheoStrategy>(placeEdgePercent, cancelEdgePercent);
+        }
         default:
             throw std::runtime_error("Invalid strategy choice");
     }
@@ -161,7 +192,7 @@ int main(int argc, char* argv[]) {
             }
             
             // Create chosen strategy
-            auto strategy = createStrategy(strategyChoice);
+            auto strategy = createStrategy(strategyChoice, config);
             
             // Set strategy in simulator
             simulator.setStrategy(strategy);
@@ -208,7 +239,7 @@ int main(int argc, char* argv[]) {
             }
             
             // Create chosen strategy
-            auto strategy = createStrategy(strategyChoice);
+            auto strategy = createStrategy(strategyChoice, config);
             
             // Set strategy in simulator
             simulator.setStrategy(strategy);

@@ -10,3 +10,10 @@ exchange_latency_ns = 10000  # 10µs
 [simulation]
 # Whether to use queue simulation (true) or tops/fills (false)
 use_queue_simulation = false
+
+[strategy]
+# Theo strategy parameters
+# Minimum edge required to place a new order (as percent)
+place_edge_percent = 0.01
+# Minimum edge required to keep an existing order (as percent)
+cancel_edge_percent = 0.005
