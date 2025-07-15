@@ -17,3 +17,7 @@ use_queue_simulation = false
 place_edge_percent = 0.01
 # Minimum edge required to keep an existing order (as percent)
 cancel_edge_percent = 0.005
+
+# Correlation strategy parameters
+# Self weight (0.0-1.0)
+self_weight = 0.5

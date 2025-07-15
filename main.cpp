@@ -16,6 +16,7 @@
 // Include all strategy headers
 #include "strategies/basic_strategy.h"
 #include "strategies/theo_strategy.h"
+#include "strategies/correlation_strategy.h"
 
 // Helper function to check if file exists
 bool file_exists(const std::string& filename) {
@@ -33,7 +34,8 @@ std::map<std::string, std::variant<uint64_t, double, bool>> loadConfigFromToml(c
     config["use_queue_simulation"] = false;
     config["place_edge_percent"] = 0.1;
     config["cancel_edge_percent"] = 0.05;
-    
+    config["self_weight"] = 0.5;
+
     if (!file_exists(configFilePath)) {
         std::cerr << "Warning: Config file not found: " << configFilePath << std::endl;
         std::cerr << "Using default values instead." << std::endl;
@@ -77,6 +79,10 @@ std::map<std::string, std::variant<uint64_t, double, bool>> loadConfigFromToml(c
             if (strategy.contains("cancel_edge_percent")) {
                 config["cancel_edge_percent"] = toml::find<double>(strategy, "cancel_edge_percent");
             }
+            
+            if (strategy.contains("self_weight")) {
+                config["self_weight"] = toml::find<double>(strategy, "self_weight");
+            }
         }
 
         std::cout << "Loaded configuration from: " << configFilePath << std::endl;
@@ -87,6 +93,7 @@ std::map<std::string, std::variant<uint64_t, double, bool>> loadConfigFromToml(c
         std::cout << "  Queue Simulation: " << (std::get<bool>(config["use_queue_simulation"]) ? "Enabled" : "Disabled") << std::endl;
         std::cout << "  Place Edge Percent: " << std::get<double>(config["place_edge_percent"]) << "%" << std::endl;
         std::cout << "  Cancel Edge Percent: " << std::get<double>(config["cancel_edge_percent"]) << "%" << std::endl;
+        std::cout << "  Self Weight: " << std::get<double>(config["self_weight"]) << std::endl;
     }
     catch (const std::exception& e) {
         std::cerr << "Error loading TOML config file: " << e.what() << std::endl;
@@ -97,7 +104,7 @@ std::map<std::string, std::variant<uint64_t, double, bool>> loadConfigFromToml(c
 }
 
 // Function to create strategy based on user choice
-std::shared_ptr<Strategy> createStrategy(int choice, const std::map<std::string, std::variant<uint64_t, double, bool>>& config) {
+std::shared_ptr<Strategy> createStrategy(int choice, const std::map<std::string, std::variant<uint64_t, double, bool>>& config, int argc = 0, char* argv[] = nullptr) {
     switch (choice) {
         case 1:
             return std::make_shared<BasicStrategy>();
@@ -117,6 +124,36 @@ std::shared_ptr<Strategy> createStrategy(int choice, const std::map<std::string,
             
             return std::make_shared<TheoStrategy>(placeEdgePercent, cancelEdgePercent);
         }
+        case 3: {
+            // Extract CorrelationStrategy parameters from config
+            double placeEdgePercent = std::get<double>(config.at("place_edge_percent"));
+            double cancelEdgePercent = std::get<double>(config.at("cancel_edge_percent"));
+            double selfWeight = std::get<double>(config.at("self_weight"));
+            
+            // Ask for correlation CSV path
+            std::string correlationPath;
+            std::cout << "Enter path to correlation CSV file: ";
+            std::cin >> correlationPath;
+            
+            if (!file_exists(correlationPath)) {
+                std::cerr << "Warning: Correlation CSV file not found: " << correlationPath << std::endl;
+                std::cerr << "Using default path: /data/correlation_data/overall_correlations.csv" << std::endl;
+                correlationPath = "/data/correlation_data/overall_correlations.csv";
+            }
+            
+            // Use the topsFilePath or book_eventsFilePath from the main function
+            std::string dataPath = "";
+            if (argc >= 2 && argv != nullptr) {
+                dataPath = argv[1];
+            }
+            
+            std::cout << "Creating CorrelationStrategy with place_edge=" << placeEdgePercent
+                    << "%, cancel_edge=" << cancelEdgePercent 
+                    << "%, self_weight=" << selfWeight << std::endl;
+                    
+            return std::make_shared<CorrelationStrategy>(correlationPath, placeEdgePercent, 
+                                                    cancelEdgePercent, selfWeight, dataPath);
+        }
         default:
             throw std::runtime_error("Invalid strategy choice");
     }
@@ -127,6 +164,7 @@ void displayAvailableStrategies() {
     std::cout << "\nAvailable Strategies:\n";
     std::cout << "1. Basic Strategy - Simple strategy that places orders at the top of the book\n";
     std::cout << "2. Theo Strategy - Advanced strategy that calculates theoretical value using a time-weighted EMA of trades and midpoints\n";
+    std::cout << "3. Correlation Strategy - Strategy that uses correlations between symbols to calculate theoretical prices\n";
 }
 
 int main(int argc, char* argv[]) {
@@ -192,7 +230,7 @@ int main(int argc, char* argv[]) {
             }
             
             // Create chosen strategy
-            auto strategy = createStrategy(strategyChoice, config);
+            auto strategy = createStrategy(strategyChoice, config, argc, argv);
             
             // Set strategy in simulator
             simulator.setStrategy(strategy);
